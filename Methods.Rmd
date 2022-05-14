@@ -1,0 +1,1381 @@
+---
+title: "Analysis of COVID temporary cessation payments allocated to the Dutch fleet"
+subtitle: "Detailed methodology"
+author: "Frédéric Le Manach"
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+output:
+  html_document:
+    fig_caption: yes
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    number_sections: true
+always_allow_html: true
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, dpi = 300)
+```
+
+```{r, include = FALSE, message = FALSE, results = FALSE, echo = FALSE, warning = FALSE}
+#Load necessary scripts
+source("Scripts/Functions/load_packages.R") #Load packages
+source("Scripts/Others/plot_themes.R") #Load plot themes
+
+#Create function to stylize tables
+table <- function(df, caption) {
+  options(knitr.kable.NA = "")
+  df %>%
+    kbl(caption = caption) %>%
+    kable_paper(full_width = TRUE) %>%
+    kable_styling(bootstrap_options = c("striped", "condensed", "responsive", "hover")) %>%
+    row_spec(0, bold = TRUE) %>%
+    collapse_rows(columns = 1:1, valign = "top") %>%
+    scroll_box(width = "100%")
+}
+```
+
+# Making the database
+
+## The European fleet register
+
+The EU fleet register (<https://webgate.ec.europa.eu/fleet-europa/search_en>) --- which contains all historical records relating to fishing vessels flagged in EU Member States --- was downloaded on 19 April 2021 with the following filters:
+
+- Country: 'EU'  
+- Period: 'All vessels'  
+- Search data context: 'Search data in the whole history of the vessels'
+
+The downloaded file was then processed. The first step was to load it:
+
+```{r}
+fleet <- read.csv2("Data/Raw.nosync/vesselRegistryListResults.csv", quote = "", stringsAsFactors = FALSE) #Load raw data from EU website
+```
+
+### Fixing incorrect records
+
+We then proceeded with cleaning the fleet's data. The first step was to fix the Register's exported file, which contained `r nrow(fleet %>% filter(LOA == ""))` rows that did not tabulate correctly:
+
+```{r, message = FALSE}
+fleet <- fleet %>%
+  filter(!LOA == "" & !Country.of.Registration == "\"\"") %>% #Set aside correct records
+  bind_rows(fleet %>% #Deal with incorrect records (duplicate rows that incorrectly tabulated)
+              filter(Country.of.Registration == "\"\"") %>% #Set aside first part of duplicate records
+              select(c(Event:Power.of.main.engine)) %>%
+              rename_at(vars(colnames(fleet %>% #Rename columns based on correct records
+                                        filter(Country.of.Registration == "\"\"") %>%
+                                        select(c(Event:Power.of.main.engine)))), 
+                        ~ colnames(fleet %>%
+                                     select(c(IRCS.indicator:ncol(.))))) %>%
+              bind_cols(fleet %>% #Bind fixed duplicates with other part of duplicate records
+                          filter(LOA == "") %>%
+                          select(c(1:Name.of.vessel))) %>%
+              mutate(Place.of.registration = "",
+                     IRCS = "",
+                     Hull.material = as.integer(Hull.material)))
+```
+
+### Cleaning records
+
+First, we selected the columns of interest and renamed them:
+
+```{r}
+fleet <- fleet %>%
+  select(country = Country.of.Registration, #Keep columns of interest and rename them
+         cfr = CFR, 
+         external_marking = External.marking,
+         vessel_name = Name.of.vessel, 
+         event_start_date = Event.Start.Date, 
+         event_end_date = Event.End.Date, 
+         gear_code = Main.fishing.gear,
+         length = LOA,
+         power = Power.of.main.engine)
+```
+
+We then transformed a few columns:
+
+```{r}
+fleet <- fleet %>%
+  mutate(across(where(is.character), str_trim), #Remove all trailing and leading whitespace
+         external_marking = str_remove_all(external_marking, c("\\\"|\\\r|\\\n|\\*|/UFA| ?|-?")), #Remove these patterns
+         external_marking = str_replace(external_marking, "^([a-zA-Z]+)(0|-)([0-9]+)$", "\\1\\3"), #Further clean external_marking
+         vessel_name = str_to_upper(str_replace(vessel_name, "-", " ")), #Capitalize vessel_name
+         vessel_name = str_replace(vessel_name, "  ", " "), #Remove double spaces
+         event_start_date = as.Date(event_start_date, origin = "1899-12-30"), #Make dates actual dates
+         event_end_date = as.Date(ifelse(event_end_date == "2100-12-31", "2021-04-19", event_end_date), origin = "1899-12-30"), #Replace last records by download date and make dates actual dates
+         length = as.numeric(length)) %>% #Convert as numeric
+  distinct()
+```
+
+We then added a `gear` based on `gear_code`:
+
+```{r}
+fleet <- fleet %>%
+  left_join(read_excel("Data/Raw.nosync/MDR_Gear_Type.xls") %>% #Downloaded on the European Commission's CIRCABC platform
+              select(gear_code = Code,
+                     gear = EnDescription,
+                     gear_cat = SubCategory) %>%
+              #Cleaning gear and gear_cat
+              mutate(gear = str_to_sentence(str_remove(gear, "- ")),
+                     gear = ifelse(grepl("know", ignore.case = TRUE, gear), "Unknown gear", gear),
+                     gear_cat = ifelse(grepl("mid", ignore.case = TRUE, gear_cat), "Pelagic trawls & seines",
+                                       ifelse(grepl("bottom", ignore.case = TRUE, gear_cat), "Bottom trawls & dredges",
+                                              ifelse(grepl("surround", ignore.case = TRUE, gear), "Pelagic trawls & seines", 
+                                                     ifelse(grepl("gill|trammel", ignore.case = TRUE, gear), "Entangling nets", 
+                                                            ifelse(grepl("long", ignore.case = TRUE, gear), "Longlines", 
+                                                                   ifelse(grepl("line", ignore.case = TRUE, gear), "Hook & lines", 
+                                                                          ifelse(grepl("hand|beach", ignore.case = TRUE, gear), "Other gears",  
+                                                                                 ifelse(grepl("dredge", ignore.case = TRUE, gear), "Bottom trawls & dredges",  
+                                                                                        ifelse(grepl("bottom|danish|scottish", ignore.case = TRUE, gear), "Bottom trawls & dredges",  
+                                                                                               ifelse(grepl("trawl", ignore.case = TRUE, gear), "Undet. trawls",  
+                                                                                                      ifelse(grepl("pot|trap|pound|fyke|weir", ignore.case = TRUE, gear), "Pots & traps",  
+                                                                                                             ifelse(grepl("purse|seine", ignore.case = TRUE, gear) & !grepl("PS", gear_code), "Pelagic trawls & seines",  
+                                                                                                                    ifelse(grepl("PS", ignore.case = TRUE, gear_code), "Purse seines",  
+                                                                                                                           ifelse(grepl("unknown", ignore.case = TRUE, gear), "Undet.", "Other gears"))))))))))))))) %>%
+              #Adding missing gears
+              add_row(gear_code = c("", "FDV", "GES", "HMS", "LVS", "NS", "SDV", "OTS", "000"), 
+                      gear = c("Unknown gear", "Free diving", "Undet. nets", "Undet. dredges", "Set vertical lines", "Unknown gear", "Undet. bottom seines", "Undet. twin trawls", "Unknown gear"), 
+                      gear_cat = c("Undet.", "Other gears", "Entangling nets ", "Bottom trawls & dredges", "Hook & lines", "Undet.", "Bottom trawls & dredges", "Undet. trawls", "Undet.")),
+            by = "gear_code") %>%
+  select(-gear_code)
+```
+
+Finally, we simplified the records:
+
+```{r}
+fleet <- setDT(fleet)
+fleet <- fleet[,.(event_start_date = min(event_start_date),
+                  event_end_date = max(event_end_date)) ,
+               by = .(rleid(country, cfr, external_marking, vessel_name, gear, gear_cat, length, power),
+                      country, 
+                      cfr,
+                      external_marking,
+                      vessel_name,
+                      gear,
+                      gear_cat,
+                      length, power)] %>%
+  select(-rleid) %>%
+  filter(!event_end_date < "2014-01-01")
+```
+
+## The European Fisheries & Maritime Fund (EMFF)
+
+The EMFF list of beneficiaries was downloaded from the Netherlands Enterprise Agency's (RVO) website (<https://www.rvo.nl/onderwerpen/agrarisch-ondernemen/visserij-en-aquacultuur/europees-fonds-voor-maritieme-zaken-en-visserij-efmzv/openbaarmaking-efmzv-subsidies>) and loaded:
+
+```{r}
+emff <- read.xlsx("Data/Raw.nosync/Openbaarmaking_EFMZV_oktober_2021.xlsx")
+```
+
+We then selected and renamed the columns of interest:
+
+```{r}
+emff <- emff %>% 
+  select(beneficiary = Naam.van.de.begunstigde,
+         cfr = Community.Fleet.Registry.identificatienummer,
+         project_name = Naam.van.de.concrete.actie,
+         project_description = Samenvatting.van.de.concrete.actie,
+         project_start = Begindatum.van.de.concrete.actie,
+         project_end = Einddatum.van.de.concrete.actie,
+         payment_date = `Datum.subsidie-vaststellingen`,
+         subsidy_total = Totale.subsidiabele.uitgaven,
+         subsidy_eu = Bedrag.van.de.bijdrage.van.de.Unie,
+         zip_code = Postcode.van.de.concrete.actie,
+         eu_priority = Vermelding.van.de.betrokken.Unieprioriteit)
+```
+
+We then modified a few columns:
+
+```{r}
+emff <- emff %>%
+  mutate(across(where(is.character), str_trim), #Remove all trailing and leading whitespace
+         across(contains(c("start", "end", "date")), ~as.Date(as.character(.), format = "%Y%m%d")),
+         eu_priority = case_when(eu_priority == "UP1" ~ "Fisheries",
+                                 eu_priority == "UP2" ~ "Aquaculture",
+                                 eu_priority == "UP3" ~ "Common Fisheries Policy",
+                                 eu_priority == "UP4" ~ "Community-led local development strategies",
+                                 eu_priority == "UP5" ~ "Marketing and processing",
+                                 eu_priority == "UP6" ~ "Integrated Maritime Policy"))
+```
+
+We set aside all records pertaining to COVID-19:
+
+```{r}
+emff_covid <- emff %>% 
+  filter_all(any_vars(grepl("stilliggen", ., ignore.case = TRUE) & grepl("covid", ., ignore.case = TRUE))) # 'Stilliggen' is Dutch for 'cessation'
+```
+
+At that stage, `r nrow(emff_covid)` rows out of the `r nrow(emff)` rows of the EMFF list of beneficiaries --- i.e. `r round((nrow(emff_covid) / nrow(emff)) *100, 1)` % --- were set aside and corresponded to COVID temporary cessation payments. In value, this `r nrow(emff_covid)` accounted for `r format(emff_covid %>% summarise(total = sum(subsidy_total)), big.mark = ",")` EUR, i.e. `r round((emff_covid %>% summarise(total = sum(subsidy_total)) / emff %>% summarise(total = sum(subsidy_total))) * 100, 1)` % of the entire EMFF allocated, and `r round((emff_covid %>% summarise(total = sum(subsidy_total)) / emff %>% filter(eu_priority == "Fisheries") %>% summarise(total = sum(subsidy_total))) * 100, 1)` % of Priority #1.
+
+## Matching records
+
+We then matched EMFF records with the Register:
+
+```{r}
+emff_covid <- emff_covid %>%
+  mutate(id = 1:n()) %>%
+  left_join(fleet,
+            by = "cfr") %>%
+  rowwise() %>%
+  mutate(ndays = abs(pmax(pmin(project_end, event_end_date) - pmax(project_start, event_start_date) + 1, pmax(pmin(project_end, event_end_date) - pmax(project_start, event_start_date) + 1)))) %>% #Calculate distance between intervals. Overlap increases towards zero
+  with_groups(id, filter, ndays == min(ndays)) %>% #Keeps nearest or most overlapping record
+  select(-event_start_date, -event_end_date, -ndays) %>%
+  distinct()
+```
+
+We remove from the list of subsidized vessels, the two vessels which share the name WR226 - Jack Cornelis. Surprisingly, these two vessels (they have two different CFR based on the list of beneficiaries) have the same external marking, the same name, and also the same MMSI (based on the fleet register). Since we could not identified these two vessels, we decided to exclude them from the analysis. 
+
+```{r}
+
+emff_covid <- emff_covid %>%
+  filter(!external_marking == "WR226")
+  
+```
+
+
+Following the ducth regultation n° WJZ/20087172 (https://zoek.officielebekendmakingen.nl/stcrt-2020-25324.html) giving the amount of COVID-19 temporary cessation subsidies that a vessel can perceived given its characteristics, we can calculate the number of weeks subsidized for each vessel based on the power of their main engine and the total amount of subsidy perceived.
+
+```{r}
+
+emff_covid <- emff_covid %>%
+  mutate (power = as.numeric(power), 
+          week_subsidy = ifelse(power*1.34102209 < 260, subsidy_total/2200, # 1.34102209 is the conversion factor from kW to cv
+          ifelse(power*1.34102209>260 & power*1.34102209<300, subsidy_total/4400, 
+                 ifelse(power*1.34102209>300, subsidy_total/8800, NA))))
+
+```
+
+We then plot the distribution of TC subsidies between vessel size class and gear 
+
+```{r}
+ ggplot(emff_covid %>% 
+  mutate(class_length = ifelse(length < 12, "<12 m", 
+                               ifelse(length >= 12 & length < 25, "12-25 m", #Official FranceAgriMer classification
+                                      ifelse(length >= 25 & length < 40, "25-40 m", ">40 m")))) %>%
+    mutate(gear = ifelse(gear %in% c("Scottish seines", "Danish seines", "Pair seines"), "Demersal seine",
+                         ifelse(gear %in% c("Single boat bottom otter trawls", "Twin bottom otter trawls"), "Otter trawl",
+                                ifelse(gear == "Beam trawls", "Beam trawl",
+                                       ifelse(gear == "Pots", "Pot",
+                                              ifelse(gear == "Set gillnets (anchored)", "Gillnets", gear)))))) %>%
+  group_by(class_length, gear) %>%
+  summarise(subsidy = sum(subsidy_total), subsidy = subsidy/10^6) %>%
+  ungroup() %>%
+  add_row (class_length = "<12 m", gear = "Beam trawl", subsidy = 0) %>% # we add a row for the <12 m size class, since it did not received any subsidies. 
+  mutate(class_length = factor (class_length, levels = c("<12 m", "12-25 m", "25-40 m", ">40 m"))), aes(x=class_length, y=subsidy, fill = gear)) +
+  geom_col (color = "grey0") +
+  labs (x="Vessel length class", y ="Subsidies received for temporary cessation (million EUR)", fill = "Fishing gear", caption = "This plot includes all vessels that received subsidies for temporary\ncessation, i.e. those that landed in PEFA and those that did not.") + 
+  theme_bw () %+% 
+  theme(plot.caption= element_text(hjust = 0)) +
+  scale_fill_viridis_d () 
+
+
+ggsave(last_plot(), file = "Output/Figures/Subsidies received for temporary cessation.png", width = 30, height = 15, unit = "cm")
+
+```
+
+# Results
+
+## Culprit vessels
+
+Following the ducth regultation n° WJZ/20087172 (https://zoek.officielebekendmakingen.nl/stcrt-2020-25324.html) about the COVID-19 temporary cessation subsidies, subsidized vessels have to :
+
+1) Stop their fishing activity during 7 consecutive days per subsidized week, from 12:00 a.m. on the first day to 11:59 p.m. on the seventh day. 
+
+2) Switch on their tracking system (AIS) during the whole temporary cessation period.
+
+Vessels can be subsidized for up to 5 weeks, meaning they have to stop their fishing activity for 5 x 7 consecutive days and prove they stayed at the port thanks to their tracking system.
+
+### The global fishing watch data
+
+To verify that the subsidized vessels have respected these two conditions, we manually extracted on global fishing watch the fishing days as well as the days when the AIS was switched off.  
+
+```{r}
+
+# Let's load the GFW data
+
+gfw_data <- read.xlsx("Data/Processed.nosync/GFW_data.xlsx") %>% 
+  mutate_at(vars(c("project_start", "project_end", "fishing_start_gfw", "fishing_end_gfw", "ais_off_begin_gfw", "ais_off_end_gfw")), ~as.Date(., origin = "1899-12-30")) %>%
+  select (-data_acquisition, -access) %>% 
+  mutate(fishing_period = interval(fishing_start_gfw, fishing_end_gfw)) %>%
+  mutate(ais_off_period = interval(ais_off_begin_gfw, ais_off_end_gfw)) %>%
+  select (-c("fishing_start_gfw", "fishing_end_gfw", "ais_off_begin_gfw", "ais_off_end_gfw")) %>% 
+  pivot_longer(cols = c("fishing_period", "ais_off_period"), names_to = "action", values_to = "time_period") %>% 
+  arrange(external_marking, time_period) %>% 
+  filter(!is.na(time_period))
+
+vessel_not_found <- read.xlsx("Data/Processed.nosync/GFW_data.xlsx") %>%
+  filter (access == "Not found") %>%
+  select (external_marking)
+
+```
+
+Then, we want to know which vessel switched off its AIS at least once during the temporary cessation period. 
+
+```{r}
+
+emff_covid <- emff_covid %>%
+  left_join(gfw_data %>%
+  filter(action == "ais_off_period") %>%
+  select (external_marking) %>% 
+  distinct() %>%
+  mutate (culprit_ais_off = "TRUE"), by = "external_marking") %>%
+  mutate (culprit_ais_off = ifelse(is.na(culprit_ais_off) & !external_marking %in% c(vessel_not_found %>% pull ()), "FALSE", culprit_ais_off))
+
+```
+
+Among the `r nrow(emff_covid)` vessels that received subsidies, `r nrow(emff_covid %>% filter(culprit_ais_off == "TRUE"))` switched off at least once their AIS during the temporary cessation period, and `r nrow(emff_covid %>% filter(culprit_ais_off == "FALSE"))` did not switch off their AIS. The remaining `r nrow(emff_covid %>% filter(is.na(culprit_ais_off)))` vessels were not found in GFW. 
+
+The following list indicates the name of the `r nrow(emff_covid %>% filter(is.na(culprit_ais_off)))` vessels that received TC subsidies but that we could not find in GFW. 
+
+```{r}
+
+table(emff_covid %>% 
+        filter (is.na(culprit_ais_off)) %>% 
+        select(external_marking, cfr, vessel_name), "List of vessels that received TC subsidies but that we could not find in GFW")
+
+```
+
+We remove those vessels from the following analyses.
+
+```{r}
+
+emff_covid <- emff_covid %>%
+  filter (!is.na(culprit_ais_off))
+
+```
+
+In addition, we remove from the following analyses `r nrow(emff_covid %>% filter (length<15))` vessels whose length is between 12-15 m, because according to the European Regulation 1224/2009 (https://eur-lex.europa.eu/LexUriServ/LexUriServ.do?uri=OJ:L:2009:343:0001:0050:fr:PDF), they don't have to own an AIS system. 
+
+```{r}
+
+emff_covid <- emff_covid %>%
+  filter (length >= 15)
+
+```
+
+Hence the following analyses focus on the `r nrow(emff_covid)` subsidized vessels that were identified on GFW and whose length is higher than 15 m. 
+
+We then calculate the fraction of the temporary cessation period during which vessels switched off their AIS. 
+
+```{r}
+
+emff_covid <- emff_covid %>%
+  left_join(gfw_data %>%
+  filter(action == "ais_off_period") %>%
+  mutate(ais_off_days = as.numeric(as.Date(int_end(time_period)) - as.Date(int_start(time_period))) + 1) %>% # we add one to get the two extremities of the time interval
+  group_by(external_marking, project_start, project_end) %>%
+  summarise (ais_off_days = sum(ais_off_days)) %>%
+  ungroup () %>%
+  mutate (tc_days = as.numeric(project_end - project_start) + 1,
+          ais_off_perc = round(ais_off_days * 100 / tc_days,1)) %>% 
+    select(external_marking, ais_off_perc), by = "external_marking") %>%
+    mutate(ais_off_perc = ifelse(is.na(ais_off_perc) & !external_marking %in% c(vessel_not_found %>% pull ()), 0, ais_off_perc))
+    
+```
+
+We then determine if the subsidized vessels stopped their fishing activity during 7 consecutive days per subsidized week. Since we focus on the number of days spent without fishing and with the AIS on instead of the number of days at the port, this method is conservative. Indeed, we consider a days spent at sea without fishing the same as if the vessel remained docked, whereas the ducth regultation n° WJZ/20087172 indicates that the subsidized vessel have to prove it remain docked. 
+
+The following analysis aims to look for vessels that can prove they stopped their fishing activity during 7 consecutive days per subsidized week, although their AIS was switched off intermittently.
+
+```{r}
+
+# cessation_begin contains the number of days of the first full period spent without fishing and with the AIS switched on 
+
+cessation_begin <- gfw_data %>% 
+  group_by(external_marking) %>% 
+  slice(1) %>% 
+  ungroup () %>% 
+  mutate(cessation_days = as.numeric(as.Date(int_start(time_period)) - project_start)) %>% 
+  select(external_marking, cessation_days)
+
+# cessation_end contains the number of days of the last full period spent without fishing and with the AIS switched on 
+
+cessation_end <- gfw_data %>% 
+  arrange(external_marking, desc(time_period)) %>% 
+  group_by(external_marking) %>% 
+  slice(1) %>% 
+  ungroup () %>% 
+  mutate(cessation_days = as.numeric(project_end - as.Date(int_end(time_period)))) %>%
+  select(external_marking, cessation_days)
+
+# cessation_weeks contains the number of full weeks (i.e. 7 consecutive days) spent without fishing and with the AIS on.
+
+cessation_weeks <- gfw_data %>% 
+  mutate (cessation_days = as.numeric(as.Date(int_start(lead(time_period))) - as.Date(int_end(time_period)))-1) %>% # we calculate between each successive period, the number of days spent without fishing and with the AIS on
+  group_by(external_marking) %>% 
+  slice(-n()) %>% # we remove the last row because because there is n-1 periods of time between n successive time intervals
+  ungroup () %>% 
+  select(external_marking, cessation_days) %>% 
+  bind_rows (cessation_begin) %>% # we add the number of days of the first full period spent without fishing and with the AIS switched on
+  bind_rows (cessation_end) %>% # we add the number of days of the last full period spent without fishing and with the AIS switched on 
+  arrange(external_marking) %>%
+  mutate(cessation_weeks = floor(cessation_days/7)) %>% # we convert days into weeks. As we are only interest by full weeks (i.e., 7 consecutive days), we round to the lower integer. 
+  group_by(external_marking) %>%
+  summarise(cessation_weeks = sum(cessation_weeks)) %>% # we calculate the sum of weeks spent without fishing and with the AIS on
+  ungroup ()
+
+# we create a new column (culprit_seven_days_gfw) in emff_covid that indicates if vessels can prove thanks to their AIS if they have stopped their fishing activity during 7 consecutive days per subsidized week. 
+
+emff_covid <- emff_covid %>%
+  left_join(cessation_weeks, by = "external_marking") %>%
+  mutate (culprit_7days_gfw = ifelse(cessation_weeks >= week_subsidy, "FALSE", "UNKNOWN")) %>%
+  select(-cessation_weeks)
+
+rm(cessation_begin, cessation_end, cessation_weeks, vessel_not_found)
+
+```
+
+Then, we focus on the number of days between each fishing period (while in the previous analysis we focused on the number of days without fishing AND with the AIS on).
+
+Even if the AIS record is incomplete, if the number of full weeks between each fishing period is lower than the number of week subsidized, it means that the vessel did not respect the TC rule, since even in the hypothetical case where an AIS off means the vessel is docked, there is not enough full weeks between the fishing periods to exonerate the vessel. 
+
+```{r}
+
+# This chunk is similar to the previous one. The difference is that we filter gfw_data to focus only on full weeks between fishing periods (we don't take into account the AIS off periods)
+
+# cessation_begin contains the number of days of the first full period spent without fishing 
+
+cessation_begin <- gfw_data %>% 
+  filter (action == "fishing_period") %>%
+  group_by(external_marking) %>% 
+  slice(1) %>% 
+  ungroup () %>% 
+  mutate(cessation_days = as.numeric(as.Date(int_start(time_period)) - project_start)) %>% 
+  select(external_marking, cessation_days)
+
+# cessation_end contains the number of days of the last full period spent without fishing 
+
+cessation_end <- gfw_data %>% 
+  filter (action == "fishing_period") %>%
+  arrange(external_marking, desc(time_period)) %>% 
+  group_by(external_marking) %>% 
+  slice(1) %>% 
+  ungroup () %>% 
+  mutate(cessation_days = as.numeric(project_end - as.Date(int_end(time_period)))) %>%
+  select(external_marking, cessation_days)
+
+# cessation_weeks contains the number of full weeks (i.e. 7 consecutive days) spent without fishing 
+
+cessation_weeks <- gfw_data %>% 
+  filter (action == "fishing_period") %>%
+  mutate (cessation_days = as.numeric(as.Date(int_start(lead(time_period))) - as.Date(int_end(time_period)))-1) %>% # we calculate between each successive period, the number of days spent without fishing 
+  group_by(external_marking) %>% 
+  slice(-n()) %>% # we remove the last row because because there is n-1 periods of time between n successive time intervals
+  ungroup () %>% 
+  select(external_marking, cessation_days) %>% 
+  bind_rows (cessation_begin) %>% # we add the number of days of the first full period spent without fishing 
+  bind_rows (cessation_end) %>% # we add the number of days of the last full period spent without fishing 
+  arrange(external_marking) %>%
+  mutate(cessation_weeks = floor(cessation_days/7)) %>% # we convert days into weeks. As we are only interest by full weeks (i.e., 7 consecutive days), we round to the lower integer. 
+  group_by(external_marking) %>%
+  summarise(cessation_weeks = sum(cessation_weeks)) %>% # we calculate the sum of weeks spent without fishing 
+  ungroup ()
+
+# we add the TRUE category to culprit_7days_gfw which contains the vessels we identified as culprit 
+
+emff_covid <- emff_covid %>%
+  left_join(cessation_weeks, by = "external_marking") %>%
+  mutate (culprit_7days_gfw = ifelse(cessation_weeks < week_subsidy & !is.na(cessation_weeks), "TRUE", culprit_7days_gfw)) %>% 
+  select(-cessation_weeks)
+
+rm(cessation_begin, cessation_end, cessation_weeks)
+
+```
+
+
+### The fish auction data (PEFA)
+
+Data aggregated daily from the PEFA fish auctions website were loaded:
+
+```{r}
+pefa <- read.xlsx("Data/Raw.nosync/data_pefa.xlsx", sheet = "TOTAL")
+```
+
+We then renamed the columns of interest:
+
+```{r}
+pefa <- pefa %>% 
+  select(date = Date,
+         external_marking = Navire,
+         vessel_name = Nom.du.navire,
+         fishing_zone = Zone.de.pêche,
+         fishing_days = Nombres.de.jours.en.mer,
+         pefa_gear = Méthode.de.pêche,
+         landings = Poids.total.de.poissons.débarqués)
+```
+
+And transformed a few columns:
+
+```{r}
+
+pefa <- pefa %>% 
+  mutate(across(where(is.character), str_trim)) %>% #Remove all trailing and leading whitespace
+  mutate(external_marking = str_remove_all(external_marking, c("\\\"|\\\r|\\\n|\\*|/UFA| ?|-?")), #Remove these patterns
+         external_marking = str_replace(external_marking, "^([a-zA-Z]+)(0|-)([0-9]+)$", "\\1\\3"), #Further clean external_marking
+         vessel_name = str_to_upper(str_replace(vessel_name, "-", " ")),
+         vessel_name = str_remove_all(vessel_name, c("MP ")), #Remove these patterns
+         date = as.Date(date, origin = "1899-12-30"),
+         landings = as.numeric(gsub("[^0-9]", "", landings))) %>%
+  filter(date > "2020-05-01") %>%
+  with_groups(c(external_marking, vessel_name, date, pefa_gear, fishing_days), summarise, landings = sum(landings)) %>%
+  filter(landings > 0)
+
+```
+
+We then joined EMFF beneficiaries for COVID-19 temporary cessation with PEFA data and cleaned `vessel_name` :
+
+```{r}
+
+# we want to add the fishing gear filled out in PEFA. 
+pefa_gear <- emff_covid %>%
+  left_join(pefa %>%
+              mutate(match = "OK"),
+            by = "external_marking") %>% 
+  filter(!is.na(match) & date %within% interval(project_start, project_end)) %>%
+  group_by(external_marking, pefa_gear) %>% 
+  summarise(count =n()) %>% 
+  ungroup() %>% 
+  group_by(external_marking) %>% 
+  filter (count == max(count)) %>% # if a given vessel has used different fishing gear during the TC period, we keep only the gear that was used the most
+  slice(1) %>% 
+  ungroup () %>%
+select (-count)
+
+
+emff_covid_pefa <- emff_covid %>%
+  left_join(pefa %>%
+              mutate(match = "OK"),
+            by = "external_marking") %>%
+  filter(!is.na(match) & date %within% interval(project_start, project_end)) %>% #Keep in-scope records
+  select(-c("match", "pefa_gear")) %>%
+  left_join(pefa_gear, by="external_marking") %>%
+  mutate(comment = ifelse(vessel_name.x == vessel_name.y, "Same name", NA),
+         comment = ifelse(is.na(comment) & stringdist(vessel_name.x, vessel_name.y) <= 6, "Spelling mistake", comment),
+         source = case_when(external_marking == "ARM44" ~ "ttps://www.shipdata.nl/index.php?mode=shipthumb&Schip=10",
+                            external_marking == "ARM7" ~ "https://www.shipdata.nl/index.php?mode=shipthumb&Schip=2",
+                            external_marking == "LO28" ~ "https://www.shipdata.nl/index.php?mode=shipthumb&Schip=15822",
+                            external_marking == "ST4" ~ "NL vessel from EMFF = https://www.shipdata.nl/index.php?mode=shipthumb&Schip=17268",
+                            external_marking == "TS2" ~ "NL vessel from EMFF = https://www.shipdata.nl/index.php?mode=shipthumb&Schip=15791",
+                            external_marking == "TX1" ~ "https://www.shipdata.nl/index.php?mode=shipthumb&Schip=12232",
+                            external_marking == "TX21" ~ "https://www.shipdata.nl/index.php?mode=shipthumb&Schip=17645",
+                            external_marking == "TX3" ~ "https://zoeken-mijn.s-bb.nl/Home/Details?leerbedrijfId=100373808",
+                            external_marking == "WR18" ~ "https://www.shipdata.nl/index.php?mode=shipthumb&Schip=521",
+                            external_marking == "WR22" ~ "https://www.shipdata.nl/index.php?mode=shipthumb&Schip=15783",
+                            external_marking == "WR23" ~ "https://www.shipdata.nl/index.php?mode=shipthumb&Schip=10946",
+                            external_marking == "UK171" ~ "https://www.shipdata.nl/index.php?mode=shipthumb&Schip=18821",
+                            external_marking == "TX33" ~ "Old vessel name = https://www.shipdata.nl/index.php?mode=shipthumb&Schip=12696",
+                            external_marking == "UK225" ~ "Old vessel name = https://www.shipdata.nl/index.php?mode=shipthumb&Schip=87",
+                            external_marking == "HD32" ~ "https://www.shipdata.nl/index.php?mode=shipthumb&Schip=18307"),
+         comment = ifelse(grepl("[a-zA-Z]+", source) & !grepl("NL vessel", source) & !grepl("Old vessel name", source), "Matching owner", 
+                          ifelse(grepl("NL vessel", source), "Incorrect match", 
+                                 ifelse(grepl("Old vessel name", source), "Matching old vessel name", comment))),
+         source = ifelse(comment %in% c("Same name", "Spelling mistake"), "-", source)) %>%
+  rename(vessel_name = vessel_name.x) %>%
+  select(-vessel_name.y, - culprit_ais_off, -ais_off_perc, -culprit_7days_gfw) %>%
+  filter(!(is.na(comment) | comment == "Incorrect match")) %>%
+  group_by(external_marking, date) %>% # for 6 external_marking/date combinations, we have duplicated lines because there are different numbers of fishing days. In these cases, we calculate the sum of landings, and keep only the maximum number of days spent at sea.
+  mutate(landings = sum(landings),
+         fishing_days = max(fishing_days)) %>%
+  ungroup () %>%
+  distinct ()
+
+rm(pefa_gear)
+```
+
+At this step, `r emff_covid_pefa %>% select(external_marking) %>% distinct() %>% nrow ()` out of the `r emff_covid %>% select(external_marking) %>% nrow ()` vessels that received subsidies for temporary cessation landed at least once in PEFA. 
+
+For these vessels, we estimate the number of full weeks (i.e. 7 consecutive days) spent without fishing based on the landing dates and the number of fishing days filled out in PEFA, for the whole temporary cessation period. It allows to determine if the vessels that landed in PEFA effectively stayed at the port during the number of weeks they were subsidized. Compare to GFW data, this is a complementary approach based on independent data to determine if subsidized vessels have respected the TC rules. 
+
+```{r}
+
+# cessation_begin contains the number of days spent without fishing between the beginning of the project and the first fishing period 
+
+cessation_begin <- emff_covid_pefa %>% 
+  arrange(external_marking,date) %>%
+  group_by(external_marking) %>%
+  slice(1) %>% # we select the first landing date for each vessel
+  ungroup () %>%
+  mutate(fishing_start = date - fishing_days) %>% # we take into account the number of days at sea before the first landing date to determine when fishing began. 
+  mutate(cessation_days = fishing_start - project_start) %>%
+  mutate(cessation_days = ifelse(cessation_days < 0, 0, cessation_days)) %>% # sometimes vessels were fishing at the starting date of the project, hence cessation_days is negative and we consider that the number of days without fishing is equal to zero.  
+  select(external_marking, cessation_days)
+  
+
+# cessation_end contains the number of days spent without fishing between the end of the project and the last fishing period 
+
+cessation_end <- emff_covid_pefa %>% 
+  arrange(external_marking, desc(date)) %>% # we select the last landing date for each vessel 
+  group_by(external_marking) %>%
+  slice(1) %>%
+  ungroup () %>%
+  mutate(cessation_days = as.numeric(project_end - date + 1)) %>% # we calculate the number of days without fishing between the last fishing period and and the end of the project. We add 1 to take into account the ending day of the TC period.
+  select(external_marking, cessation_days)
+
+# culprits_real contains the list of the culprit vessels based on this semi-conservative method that take into account the number of days during which vessel were fishing
+
+emff_covid <- emff_covid %>%
+  left_join(emff_covid_pefa %>% 
+              select(external_marking, date, fishing_days) %>% 
+              arrange(external_marking, date) %>% 
+              mutate(fishing_period = interval(date - fishing_days, date - 1)) %>% # fishing period corresponds to the interval of time during which vessels were fishing during temporary cessation. We consider the landing day not to be a fishing day. 
+              mutate (cessation_days = as.numeric(as.Date(int_start(lead(fishing_period))) - as.Date(int_end(fishing_period))) - 1) %>% # we calculate between each successive fishing period the number of days spent without fishing. 
+              mutate (cessation_days = ifelse(cessation_days <0, 0, cessation_days)) %>% # some fishing periods overlaps, hence the number of days spent without fishing is obviously equal to zero. 
+              group_by(external_marking) %>%
+              slice(-n()) %>% # we remove the last row because for n fishing periods, there is n-1 period of time without fishing
+              ungroup () %>% 
+              select(external_marking, cessation_days) %>%
+              bind_rows (cessation_begin) %>% # we add the the number of days spent without fishing between the beginning of the project and the first fishing period 
+              bind_rows (cessation_end) %>% # we add the number of days spent without fishing between the last fishing period and the end of the project
+              arrange(external_marking) %>%
+              mutate(cessation_weeks = floor(cessation_days/7)) %>% # we convert days into weeks. As we are only interest by full weeks (i.e., 7 consecutive days), we round to the lower integer. 
+              group_by(external_marking) %>% 
+              summarise(cessation_weeks = sum(cessation_weeks)) %>% # we calculate the sum of full weeks spent without fishing. 
+              ungroup (), by = "external_marking") %>% # we merge these data with the full list of beneficiaries (emff_covid) to compare the number of week subsidized (i.e. hence the number of weeks during which a given vessel have to stay at the port) with the number of weeks effectively spent by the vessel without fishing. 
+  mutate (culprit_7days_pefa = ifelse(cessation_weeks < week_subsidy, "TRUE", "UNKNOWN")) %>%# we create a new column indicating if the vessels that landed in PEFA stopped their fishing activity following TC rules. 
+  select(-cessation_weeks)
+
+rm(cessation_begin, cessation_end)
+
+```
+
+Based on PEFA data, we found `r emff_covid %>% filter (culprit_7days_pefa == "TRUE") %>% nrow ()` culprit vessels that did not respect the "no fishing during 7 consecutive days per week subsidized" rule.
+
+Taking into account both GFW and PEFA data, we determine if a vessel respected the "no fishing during 7 consecutive days per week subsidized" rule. We create three categories : the vessels that did not respect the rule, the vessels that did respect the rule, and the vessels for which we don't know based on our data. 
+
+```{r}
+
+culprit <- emff_covid %>% 
+  filter ((culprit_ais_off == "TRUE" & culprit_7days_gfw == "UNKNOWN" & culprit_7days_pefa == "TRUE") | 
+          (culprit_ais_off == "TRUE" & culprit_7days_gfw == "TRUE" & culprit_7days_pefa == "UNKNOWN") |
+          (culprit_ais_off == "TRUE" & culprit_7days_gfw == "TRUE" & is.na(culprit_7days_pefa)) |
+          (culprit_ais_off == "FALSE" & culprit_7days_gfw == "TRUE" & is.na(culprit_7days_pefa)) |
+          (culprit_ais_off == "FALSE" & culprit_7days_gfw == "TRUE" & culprit_7days_pefa == "UNKNOWN") |
+          (culprit_ais_off == "TRUE" & culprit_7days_gfw == "TRUE" & culprit_7days_pefa == "TRUE")) %>% 
+  select (external_marking) 
+
+```
+
+
+```{r}
+
+not_culprit <- emff_covid %>% 
+  filter ((culprit_ais_off == "TRUE" & culprit_7days_gfw == "FALSE" & is.na(culprit_7days_pefa)) | 
+          (culprit_ais_off == "FALSE" & culprit_7days_gfw == "FALSE" & culprit_7days_pefa == "UNKNOWN") |
+          (culprit_ais_off == "FALSE" & culprit_7days_gfw == "FALSE" & is.na(culprit_7days_pefa)) |
+          (culprit_ais_off == "TRUE" & culprit_7days_gfw == "FALSE" & culprit_7days_pefa == "UNKNOWN")) %>% 
+  select (external_marking) 
+
+```
+
+
+```{r}
+
+we_dont_know <- emff_covid %>% 
+  filter ((culprit_ais_off == "TRUE" & culprit_7days_gfw == "UNKNOWN" & culprit_7days_pefa == "UNKNOWN") | 
+          (is.na(culprit_ais_off) & is.na(culprit_7days_gfw) & is.na(culprit_7days_pefa)) |
+          (culprit_ais_off == "TRUE" & culprit_7days_gfw == "UNKNOWN" & is.na(culprit_7days_pefa)) |
+          (culprit_ais_off == "TRUE" & culprit_7days_gfw == "FALSE" & culprit_7days_pefa == "TRUE") | 
+          (is.na(culprit_ais_off) & is.na(culprit_7days_gfw) & culprit_7days_pefa == "UNKNOWN")) %>% 
+  select (external_marking) 
+
+```
+
+We create a new column indicating whether the vessels have respected the "no fishing during 7 consecutive days per week subsidized" rule based on the GFW and PEFA dataset. 
+
+```{r}
+
+emff_covid <- emff_covid %>%
+  left_join(culprit %>%
+              mutate(culprit_7days_gfw_pefa = "TRUE") %>%
+              bind_rows(not_culprit %>%
+              mutate(culprit_7days_gfw_pefa = "FALSE")) %>%
+              bind_rows(we_dont_know %>%
+              mutate(culprit_7days_gfw_pefa = "UNKNOWN")), by = "external_marking")
+
+rm(culprit, not_culprit, we_dont_know)
+
+```
+
+### Summary of the results 
+
+Out of the `r emff_covid %>% filter (!is.na(culprit_ais_off)) %>% nrow()` subsidized and identified vessels, only `r emff_covid %>% filter (culprit_ais_off == "FALSE" & culprit_7days_gfw_pefa == "FALSE") %>% nrow()` vessels have remained within the framework of the law by having respected i) the obligation to keep the AIS on over the entire period covered by the temporary shutdowns and ii) to stop any fishing activities during 7 consecutive days per week subsidized. These vessels received `r format(emff_covid %>% filter (culprit_ais_off == "FALSE" & culprit_7days_gfw_pefa == "FALSE") %>% ungroup () %>% summarise (sum(subsidy_total)) %>% pull (), big.mark = ",")` euros out of the `r format(emff_covid %>% ungroup () %>% summarise (sum(subsidy_total)) %>% pull (), big.mark = ",")` euros allocated to temporary cessations. `r emff_covid %>% filter (culprit_ais_off == "FALSE" & culprit_7days_gfw_pefa == "TRUE") %>% nrow()` vessels respected the obligation to keep the AIS on but did not stop their fishing activities during 7 consecutive days per week subsidized. 
+
+`r emff_covid %>% filter (culprit_ais_off == "TRUE") %>% nrow()` vessels switched at least once their AIS. Among them, `r emff_covid %>% filter (culprit_ais_off == "TRUE" & culprit_7days_gfw_pefa == "FALSE") %>% nrow()` stopped their fishing activities during 7 consecutive days per week subsidized. `r emff_covid %>% filter (culprit_ais_off == "TRUE" & culprit_7days_gfw_pefa == "TRUE") %>% nrow()` did not stop their fishing activities during 7 consecutive days per week subsidized. This was highlighted thanks to GFW and/or PEFA data. And for `r emff_covid %>% filter (culprit_ais_off == "TRUE" & culprit_7days_gfw_pefa == "UNKNOWN") %>% nrow()` vessels, we cannot conclude whether they stopped their fishing activities or not. 
+
+The following table shows the `r emff_covid %>% filter (culprit_ais_off == "FALSE" & culprit_7days_gfw_pefa == "FALSE") %>% nrow()` vessels that have remained within the framework of the law by having respected i) the obligation to keep the AIS on over the entire period covered by the temporary shutdowns and ii) to stop any fishing activities during 7 consecutive days per week subsidized.
+
+```{r, echo=FALSE}
+table(emff_covid %>% 
+        filter (culprit_ais_off == "FALSE" & culprit_7days_gfw_pefa == "FALSE") %>% 
+        arrange(external_marking) %>%
+        select("External marking" = external_marking, "Vessel name" = vessel_name,"CFR" = cfr, "Number of weeks subsidized" = week_subsidy, "Amount of subsidy (EUR)" = subsidy_total,"Fishing gear" = gear, "Length (m)" = length, "Fraction of time spent with AIS off" = ais_off_perc), "Vessels that remained within the framework of the law")
+```
+
+The following table shows the `r emff_covid %>% filter (culprit_ais_off == "FALSE" & culprit_7days_gfw_pefa == "TRUE") %>% nrow()` vessels that have respected the obligation to keep the AIS on but did not stop their fishing activities during 7 consecutive days per week subsidized. 
+
+```{r, echo=FALSE}
+
+table(emff_covid %>% 
+  filter (culprit_ais_off == "FALSE" & culprit_7days_gfw_pefa == "TRUE") %>%
+  arrange(external_marking) %>%
+  select("External marking" = external_marking, "Vessel name" = vessel_name,"CFR" = cfr, "Number of weeks subsidized" = week_subsidy, "Amount of subsidy (EUR)" = subsidy_total,"Fishing gear" = gear, "Length (m)" = length, "Fraction of time spent with AIS off" = ais_off_perc), "Vessels that have respected the obligation to keep the AIS on but did not stop their fishing activities during 7 consecutive days per week subsidized")
+  
+```
+
+The following table shows the `r emff_covid %>% filter (culprit_ais_off == "TRUE" & culprit_7days_gfw_pefa == "FALSE") %>% nrow()` vessels that switched off their AIS but were able to prove they have stopped their fishing activities for seven consecutive days per week subsidized. 
+
+```{r, echo=FALSE}
+
+table(emff_covid %>% 
+  filter (culprit_ais_off == "TRUE" & culprit_7days_gfw_pefa == "FALSE") %>%
+  arrange(external_marking) %>%
+  select("External marking" = external_marking, "Vessel name" = vessel_name,"CFR" = cfr, "Number of weeks subsidized" = week_subsidy, "Amount of subsidy (EUR)" = subsidy_total,"Fishing gear" = gear, "Length (m)" = length, "Fraction of time spent with AIS off" = ais_off_perc), "Vessels that switched off their AIS but were able to prove they have stopped their fishing activities for seven consecutive days per week subsidized")
+
+```
+
+The following table shows the `r emff_covid %>% filter (culprit_ais_off == "TRUE" & culprit_7days_gfw_pefa == "TRUE") %>% nrow()` vessels that switched off their AIS and did not stop their fishing activities during 7 consecutive days per week subsidized. 
+
+```{r, echo=FALSE}
+
+table(emff_covid %>% 
+  filter (culprit_ais_off == "TRUE" & culprit_7days_gfw_pefa == "TRUE") %>%
+  arrange(external_marking) %>%
+  select("External marking" = external_marking, "Vessel name" = vessel_name,"CFR" = cfr, "Number of weeks subsidized" = week_subsidy, "Amount of subsidy (EUR)" = subsidy_total,"Fishing gear" = gear, "Length (m)" = length, "Fraction of time spent with AIS off" = ais_off_perc), "Vessels that switched off their AIS and did not stop their fishing activities during 7 consecutive days per week subsidized")
+  
+```
+
+The following table shows the `r emff_covid %>% filter (culprit_ais_off == "TRUE" & culprit_7days_gfw_pefa == "UNKNOWN") %>% nrow()` vessels that switched off their AIS but for which we cannot conclude whether they stopped their fishing activities or not. 
+ 
+```{r, echo=FALSE}
+
+table(emff_covid %>% 
+  filter (culprit_ais_off == "TRUE" & culprit_7days_gfw_pefa == "UNKNOWN") %>%
+  arrange(external_marking) %>%
+  select("External marking" = external_marking, "Vessel name" = vessel_name,"CFR" = cfr, "Number of weeks subsidized" = week_subsidy, "Amount of subsidy (EUR)" = subsidy_total,"Fishing gear" = gear, "Length (m)" = length, "Fraction of time spent with AIS off" = ais_off_perc), "Vessels that switched off their AIS but for which we cannot conclude whether they stopped their fishing activities or not")
+
+```
+ 
+### Bar codes 
+
+Bar codes are created to represent the activity (fishing days according to both PEFA and GFW, days when the AIS was switched off, landing days in PEFA auctions) of each of the `r nrow(emff_covid)` vessels that were subsidized. Plots are located in Output/Figures/Barcodes/. 
+
+The red unfilled rectangle indicates the temporary cessation period. The red vertical lines indicate the landing dates in PEFA auctions. The black bars correspond to the fishing days on GFW. The grey bars correspond to days when AIS was switched off on GFW. The cyan horizontal lines ontop of each figure indicate the fishing periods as filled out in PEFA.
+
+This figure highlights that most of the vessels switch off once or many times their AIS between two consecutive landings in PEFA, which means that they switch off their AIS while fishing. Hence, some fishing days that are declared in PEFA are not visible in GFW because the AIS was switched off. 
+
+```{r, echo=FALSE, warning=FALSE}
+
+data_fig <- read.xlsx("Data/Processed.nosync/GFW_data.xlsx") %>% 
+          mutate_at(vars(c("project_start", "project_end", "fishing_start_gfw", "fishing_end_gfw", "ais_off_begin_gfw", "ais_off_end_gfw")), ~as.Date(., origin = "1899-12-30")) %>%
+          select(-data_acquisition, -access) %>% 
+  filter (external_marking %in% c(emff_covid %>% select (external_marking) %>% pull ())) %>% 
+  bind_rows (emff_covid_pefa %>% 
+               mutate(fishing_days = ifelse(fishing_days == 0, 1, fishing_days)) %>% # if there is a landing, there is at least one fishing day
+               mutate (fishing_start_pefa = date - fishing_days, 
+                       fishing_end_pefa = date - 1) %>%
+               select (external_marking, fishing_start_pefa, fishing_end_pefa, date) %>%
+               rename(landing_date = date)) %>%
+  arrange(external_marking) %>%
+  fill(c("project_start", "project_end"), .direction = "down") %>%
+  left_join(emff_covid %>% 
+              select(external_marking, vessel_name, cfr, week_subsidy, culprit_ais_off, culprit_7days_gfw_pefa), by = "external_marking") %>%
+  mutate (label = paste0(external_marking, " ", vessel_name)) %>%
+  relocate(label, .before = "external_marking") %>% 
+    select (-external_marking, -vessel_name) %>%
+  mutate (group = ifelse(culprit_ais_off == "FALSE" & culprit_7days_gfw_pefa == "FALSE", "ais on_TC not culprit",
+                         ifelse(culprit_ais_off == "FALSE" & culprit_7days_gfw_pefa == "TRUE", "ais on_TC culprit",
+                                ifelse(culprit_ais_off == "TRUE" & culprit_7days_gfw_pefa == "FALSE", "ais off_ TC not culprit",
+                                       ifelse(culprit_ais_off == "TRUE" & culprit_7days_gfw_pefa == "TRUE", "ais off_TC culprit","ais off_TC unknown")))))
+
+for (i in 1:nrow(data_fig %>% select(group) %>% distinct())) { 
+
+dir.create(paste0("Output/Figures/Barcodes/", data_fig %>% select(group) %>% distinct() %>% slice(i) %>% pull ()))
+  
+data_fig_sub <- data_fig %>% 
+    filter(group == data_fig %>% select(group) %>% distinct() %>% slice (i) %>% pull ())
+
+vessel <- data_fig_sub %>% 
+  select (label, cfr, week_subsidy) %>% 
+  distinct ()
+
+  for (j in 1: nrow(vessel)) { 
+  
+  FileName <- paste0(vessel[j,1], ".jpg", sep = "") 
+  
+  ggplot(data_fig_sub %>% 
+    filter(label == vessel[j,1])) + 
+    geom_rect(aes(xmin = fishing_start_gfw,
+                xmax = fishing_end_gfw + 1,
+                ymin = 0,
+                ymax = 1),
+            fill = "grey0") +
+    geom_rect(aes(xmin = ais_off_begin_gfw,
+                xmax = ais_off_end_gfw + 1,
+                ymin = 0,
+                ymax = 1),
+            fill = "grey70") +
+    geom_bar(aes(x=landing_date, y = 1),
+             stat = "identity",
+             fill = "red",
+             width = 1,
+             alpha = 0.7,
+             position = position_nudge(x = 0.5)) +
+    geom_rect(aes(xmin = project_start,
+                xmax = project_end + 1,
+                ymin = 0,
+                ymax = 1),
+            color = "grey0",
+            fill = NA) + 
+    geom_segment(aes(x=fishing_start_pefa, xend=fishing_end_pefa +1, y=1.03, yend=1.03), 
+                 size =4, colour = "#49667D") +
+    theme_light () %+%
+    theme(axis.line.y = element_blank(),
+                       axis.text.y = element_blank(),
+                       axis.ticks.y = element_blank()) + 
+    labs(x=NULL, y = NULL, title = paste0(vessel[j,1], " (", vessel[j,2],")", " - Nombre de semaines subventionnées = ", vessel[j,3])) +
+    scale_x_date (date_breaks = "1 month", date_labels = "%b %d",date_minor_breaks = "1 day") 
+
+  ggsave (FileName, plot = last_plot(), path = paste0("Output/Figures/Barcodes/",data_fig %>% select(group) %>% distinct() %>% slice(i) %>% pull ()), width = 30, height = 15, unit = "cm") 
+  } 
+}
+
+```
+
+### Evidence that some vessels switch of their AIS while fishing 
+
+The following table shows the vessels that fished while their AIS was switched off. If during two landings in one of the PEFA auction, a given vessel had its AIS off and no fishing days recorded, it means it was fishing while its AIS was off. 
+
+```{r, echo = FALSE}
+
+fishing_while_ais_off <- emff_covid_pefa %>%
+  select (external_marking, vessel_name, cfr, date) %>% 
+  group_by (external_marking) %>% 
+  mutate (landings_interval = interval(date, lead(date))) %>% 
+  filter(!is.na(landings_interval)) %>%
+  select (-date) %>% 
+  ungroup () %>% 
+  left_join(emff_covid %>%
+              select(external_marking, culprit_ais_off, culprit_7days_gfw_pefa), by = "external_marking") %>%
+  mutate (group = ifelse(culprit_ais_off == "FALSE" & culprit_7days_gfw_pefa == "FALSE", "ais on_TC not culprit",
+                         ifelse(culprit_ais_off == "FALSE" & culprit_7days_gfw_pefa == "TRUE", "ais on_TC culprit",
+                                ifelse(culprit_ais_off == "TRUE" & culprit_7days_gfw_pefa == "FALSE", "ais off_ TC not culprit",
+                                       ifelse(culprit_ais_off == "TRUE" & culprit_7days_gfw_pefa == "TRUE", "ais off_TC culprit","ais off_TC unknown"))))) 
+
+fishing  <- NULL;
+ais_off <- NULL;
+
+for (i in 1:nrow(fishing_while_ais_off)) {
+  
+fishing [i] <- any(int_overlaps(fishing_while_ais_off$landings_interval [i], gfw_data %>% filter(external_marking == fishing_while_ais_off$external_marking[i] & action == "fishing_period") %>% select(time_period) %>% pull ()))
+
+ais_off [i] <- any(int_overlaps(fishing_while_ais_off$landings_interval [i], gfw_data %>% filter(external_marking == fishing_while_ais_off$external_marking[i] & action == "ais_off_period") %>% select(time_period) %>% pull ()))
+
+}
+
+fishing_while_ais_off <- fishing_while_ais_off %>%
+  bind_cols("fishing" = fishing) %>%
+  bind_cols("ais_off" = ais_off) %>% 
+  filter (fishing == "FALSE" & ais_off == "TRUE") %>%
+  select(external_marking, vessel_name, cfr, landings_interval, group)
+
+
+table(fishing_while_ais_off %>%
+  group_by(external_marking, vessel_name, cfr, group) %>%
+  summarise (count = n()) %>% 
+    ungroup () %>%
+  arrange (desc(count)), "Number of time a vessel fished while its AIS was switched off")
+
+
+```
+
+## Focus on PEFA data 
+
+### Further cleaning and adding informations
+
+#### Adding the auction
+
+We then merge the data with the name of the auction where each landing has been made. 
+
+```{r}
+# we extract all the date/landing combination in order to manually search of the PEFA website the corresponding auction.
+
+write.xlsx(emff_covid_pefa %>%
+  select (date, external_marking) %>%
+    arrange(date), 
+           "Output/Data/List of illegal landings with no auction - To be cleaned.xlsx")
+
+emff_covid_pefa <- emff_covid_pefa %>%
+  left_join(read.xlsx("Data/Processed.nosync/List of illegal landings with no auction_cleaned.xlsx") %>%
+  mutate (date = as.Date(date, origin = "1899-12-30")), by = c("date", "external_marking"))
+
+```
+
+#### Adding the detailed list of landings 
+
+We then load and clean the detailed list of landings. This detailed list has been made by manually searching on the PEFA website the detailed landing data for each vessel and for each landing day. 
+
+```{r}
+
+landing_detail <- read.xlsx("Data/Processed.nosync/List of detailed landings to get.xlsx", sheet = "CAPTURES") %>%
+  bind_rows(read.xlsx("Data/Processed.nosync/List of detailed landings to get.xlsx", sheet = "PULS")) %>%
+  select (date = Date, 
+          external_marking = vessel,
+          quality = Qualité,
+          sold = Vendu,
+          weight = Poids, 
+          msc = Cert,
+          metadata = espèce.et.taille) %>% 
+  mutate(date = as.Date(date, origin = "1899-12-30"), 
+         weight = as.numeric(gsub("[^0-9]", "", weight)),
+         metadata = str_extract(metadata, "^.+\\d{3}\\s\\d{4}-\\d{4}\\s[A-Z]{2}")) %>%
+  mutate(metadata = paste0(metadata, " ", quality),
+         external_marking = gsub(" ","",external_marking),
+         external_marking = str_remove_all(external_marking, c("\\\"|\\\r|\\\n|\\*|/UFA| ?|-?")),
+         external_marking =str_replace(external_marking, "^([a-zA-Z]+)(0|-)([0-9]+)$", "\\1\\3"))
+         
+
+emff_covid_pefa <- emff_covid_pefa %>%
+  left_join(landing_detail, by = c("date", "external_marking"))
+
+rm(landing_detail)
+
+```
+
+At this stage, the database contains `r nrow(emff_covid_pefa)` lines with the detailed landings for all vessels that landed in PEFA auctions during their temporary cessation. For `r nrow(emff_covid_pefa %>% filter (is.na(metadata)))` vessel/landing date combination, we were not able to have the detailed list of landings, only the total weight that was landed. Out of the `r nrow(emff_covid_pefa)` lines, `r emff_covid_pefa %>% count () - emff_covid_pefa %>% distinct () %>% count ()` lines were duplicated. This is due to the fact that some landing operations in the detailed list were the same, i.e. a vessel could have landed the same type of fish (species, size, quality, weight, etc.) two times, which gives two exact same lines in the database. 
+
+#### Adding the market prices 
+
+We extract all the combinations of landing days/auctions. This list will be used to manually search on the PEFA website the market prices associated with these day/auction combinations. 
+
+```{r}
+
+write.xlsx(emff_covid_pefa %>%
+  select(date, auction) %>%
+  distinct () %>% 
+    arrange(date), 
+  "Output/Data/List of market prices - To be cleaned.xlsx")
+
+```
+
+After manually search on the PEFA website, we can then load the market prices.
+
+```{r, warning=FALSE}
+
+# we load the market prices and do some cleaning of the data.
+
+market_prices <- read.xlsx("Data/Processed.nosync/List of market prices_cleaned.xlsx") %>%
+  rename(price_mean = Prix.Moy., price_max = Prix.Max.) %>%
+  mutate (Taille = str_remove(Taille, "\\s[A-Z]+"),
+    metadata = paste0(Espèce, " ", Taille, " ",Info, " ",Qual.), 
+    date = as.Date(date, format = "%d/%m/%Y"),
+    price_mean=str_remove(price_mean, " EUR"), 
+    price_max = str_remove(price_max, " EUR"),
+    price_mean=str_replace(price_mean, ",", "."), 
+    price_max = str_replace(price_max, ",", ".")) %>%
+  mutate_at(vars(c("price_mean", "price_max")), ~as.numeric(.)) %>%
+  select (-c(Espèce, Taille, Qual., Info, App.))
+
+# Some rows in market_prices are duplicated for a given species/size class/quality/state, because we can have different forms of fish (e.g. for the turbot fish) which have not the same price. However, we do not have information about the forms, we can only see in our data that a given species/size class/quality/state has different prices, resulting in duplicated lines. For these duplicated lines, we calculate the mean price and keep only one record. 
+
+market_prices <- market_prices %>% 
+    group_by(date, auction, metadata) %>% 
+    mutate (count = n()) %>% 
+    arrange(desc(count)) %>% 
+    filter (count>1) %>% 
+    mutate_at(vars(matches(c("price_mean", "price_max"))), ~mean(.)) %>% 
+    ungroup() %>% 
+    distinct () %>%
+    bind_rows(
+    market_prices %>% 
+    group_by(date, auction, metadata) %>% 
+    mutate (count = n()) %>% 
+    arrange(desc(count)) %>% 
+    filter (count == 1) %>%
+        ungroup ()) %>%
+  select (-count)
+
+```
+
+We then merge the market prices with the landing data. It will allow to calculate the turnover for each fishing vessel. 
+
+```{r}
+
+emff_covid_pefa <- emff_covid_pefa %>%
+  left_join(market_prices, by = c("date", "auction", "metadata"))
+
+```
+
+We simplify the gear names that come from the PEFA website (and which are more detailed than those from the fleet register).
+
+```{r}
+
+emff_covid_pefa <- emff_covid_pefa %>%
+  mutate (pefa_gear_category = ifelse(pefa_gear %in% c("EUROBEAMER RFS", "A TANGON", "EUROBEAMER", "CHALUT", "TWIN TRAWLING","TWINRIG RFS", "SUMWING RFS", "SUMWING"), "Conventional bottom trawl",
+          ifelse(pefa_gear %in% c("PULS WING", "PULSATING TRAWL"), "Electric trawl",
+  ifelse (pefa_gear == "SEINE NET(F)", "Demersal seine",
+          ifelse(pefa_gear == "GILLNET RFS", "Net", pefa_gear))))) %>%
+  relocate (pefa_gear_category, .after = pefa_gear)
+
+```
+
+For `r emff_covid_pefa %>% filter(!is.na(metadata) & is.na(price_mean)) %>% nrow ()` rows, the matching between the detailed landing and the market prices did not work. The metadata in the detailed landing could not be found in the market prices. In this case we search the species in the market prices without taking into account the whole metadata (size, quality, etc.). If there is more than one row associated with the species in the market prices, we calculate the mean price for this species. 
+
+```{r}
+
+emff_covid_pefa <- emff_covid_pefa %>%
+  filter (!(!is.na(metadata) & is.na(price_mean))) %>%
+  bind_rows(emff_covid_pefa %>% 
+  filter (!is.na(metadata) & is.na(price_mean)) %>%
+   mutate(species = str_extract(metadata, "[A-Z]+(\\s[A-Z]+)?")) %>% 
+  left_join(market_prices %>%
+              mutate(metadata = str_extract(metadata, "[A-Z]+(\\s[A-Z]+)?")) %>%
+              rename (species = metadata) %>%
+              group_by(date, auction, species) %>%
+              summarise (price_mean = mean(price_mean),
+                         price_max = mean(price_max)), by = c("date", "auction", "species")) %>%
+  rename (price_mean = price_mean.y, price_max = price_max.y) %>% 
+  select (-price_mean.x, -price_max.x, -species))
+
+```
+
+At this stage, there is `r emff_covid_pefa %>% filter(!is.na(metadata) & is.na(price_mean)) %>% nrow ()` out of the `r emff_covid_pefa %>% filter(!is.na(metadata)) %>% nrow ()` detailed landings that did not match with the market prices register because, for unknown reasons, the species that was sold for a given day/auction was not registered in the market prices. 
+
+We then calculate for each landing (i.e. line of the dataset) the turnover. We then merge the dataset with a list of vessels that have practiced electric fishing in the past. This list can be found in the following link : 
+http://www.bloomassociation.org/en/wp-content/uploads/2020/09/beyond-illegal-annexes.pdf
+
+```{r}
+
+emff_covid_pefa  <- emff_covid_pefa  %>% 
+  mutate (price_mean_total = price_mean * weight, 
+          price_max_total = price_max * weight) %>% 
+  left_join(read.xlsx("Data/Processed.nosync/list of electric trawlers.xlsx") %>% 
+              select ("Ext.Mark") %>% 
+              rename(external_marking = Ext.Mark) %>% 
+              mutate (external_marking = gsub(" ","",external_marking), 
+                      external_marking =str_replace(external_marking, "^([a-zA-Z]+)(0|-)([0-9]+)$", "\\1\\3"),
+                      electric_fishing = "YES"), by = "external_marking") %>%
+  mutate(electric_fishing = ifelse(is.na(electric_fishing), "NO", electric_fishing))
+  
+```
+
+#### Estimating the turnover for the 'incomplete' landings 
+
+Then, we estimate the turnover for the incomplete landings, i.e. those for which we do not have the detail of the species fished, but only the the total weight landed. To do this, we compare these incomplete landings with the the detailed landings for which fishes were fished by the same type of vessels and which were landed in the same auction (independently of the day). There is `r nrow(emff_covid_pefa  %>% filter(is.na(metadata)))` landing operations for which we do not have the landing details, i.e., `r round(nrow(emff_covid_pefa %>% filter(is.na(metadata))) * 100 / nrow(emff_covid_pefa %>% select (date, external_marking) %>% distinct ()),1)` % of the landing operations. In terms of volume landed, these incomplete landings represent `r round(emff_covid_pefa %>% filter(is.na(metadata)) %>% summarise(sum(landings)/10^3) %>% pull (), 1)` tons, i.e., `r round(emff_covid_pefa %>% filter(is.na(metadata)) %>% select(date, external_marking, landings) %>% summarise(sum(landings)/10^3) %>% pull () *100 / emff_covid_pefa %>% select(date, external_marking, landings) %>% distinct () %>% summarise(sum(landings)/10^3) %>% pull (),1)` % of the total volume landed. 
+
+```{r, echo = FALSE}
+
+# we add the fishing zone to our dataset based on PEFA data
+
+emff_covid_pefa <- emff_covid_pefa %>%
+left_join(read.xlsx("Data/Raw.nosync/data_pefa.xlsx", sheet = "TOTAL") %>% 
+    select(date = Date, external_marking = Navire, fishing_zone = Zone.de.pêche, landings = Poids.total.de.poissons.débarqués) %>% 
+    mutate(across(where(is.character), str_trim)) %>% 
+    mutate(external_marking = str_remove_all(external_marking, c("\\\"|\\\r|\\\n|\\*|/UFA| ?|-?")), 
+           external_marking = str_replace(external_marking, "^([a-zA-Z]+)(0|-)([0-9]+)$", "\\1\\3"), 
+           external_marking = gsub(" ","",external_marking),
+           date = as.Date(date, origin = "1899-12-30"),
+           landings = as.numeric(gsub("[^0-9]", "", landings))) %>% 
+      filter(date > "2020-05-01") %>%
+      group_by(external_marking, date, fishing_zone) %>%
+      summarise(landings =sum(landings, na.rm = T)), by = c("date", "external_marking", "landings")) %>%
+  ungroup () %>%
+  mutate (fishing_zone = ifelse(external_marking == "HD42" & date == "2020-09-04", "IVC",  # for these two unmatching date/vessel combinations, we manually add the fishing zone based on the pefa data
+                         ifelse(external_marking == "ARM7" & date == "2020-09-21", "IVC", fishing_zone))) 
+
+```
+
+```{r}
+
+# we first isolate incomplete landings
+
+culprits_unmatched <- emff_covid_pefa %>% 
+  filter(is.na(metadata)) %>%
+  select(external_marking, vessel_name, date, auction, pefa_gear, landings) %>%
+  mutate (pefa_gear = ifelse(pefa_gear == "SUMWING RFS", "SUMWING", pefa_gear)) # we assume these two type of vessels are similar enough, it will help to get a match for for all incomplete landings.
+
+# we also isolate detailed landings. 
+culprits_matched <- emff_covid_pefa %>%
+  filter(!is.na(metadata)) %>%
+  select(external_marking, vessel_name, date, auction, pefa_gear, weight, metadata, price_mean_total, price_max_total) %>%
+  mutate (pefa_gear = ifelse(pefa_gear == "SUMWING RFS", "SUMWING", pefa_gear))
+
+# we compare incomplete landings and search for detailed landings in the same auction and with the same type of vessel.
+
+output  <- NULL;
+
+for (i in 1:nrow(culprits_unmatched)) {
+tmp <- culprits_matched %>% 
+  filter(auction == culprits_unmatched$auction[i] & pefa_gear == culprits_unmatched$pefa_gear[i]) %>% 
+  mutate(price_mean = sum(price_mean_total, na.rm = T)/ sum(weight, na.rm = T),
+         price_max = sum(price_max_total, na.rm = T)/ sum(weight, na.rm = T)) %>%
+  select (price_mean, price_max) %>%
+  distinct ()
+  
+output <- rbind(output, tmp) #output contains the estimated prices of fish per kilogram for each incomplete landings. 
+
+}
+
+# we merge the incomplete landing records with the respective estimated price of fish per kg 
+culprits_unmatched <- culprits_unmatched %>%
+  bind_cols(output) 
+
+```
+
+We finally estimate the turnover for the incomplete landings based on the estimated prices of fish per kg.
+
+```{r}
+
+emff_covid_pefa <- emff_covid_pefa %>%
+  filter(!is.na(metadata)) %>%
+  mutate (price = "Real prices") %>%
+  bind_rows(emff_covid_pefa %>%
+  filter(is.na(metadata)) %>% 
+    select(-c("price_mean", "price_max")) %>% 
+    left_join(culprits_unmatched %>% 
+                select (-c("vessel_name", "auction", "pefa_gear")) %>% 
+                mutate (price = "Estimated prices"), by = c("external_marking", "date", "landings")) %>% 
+    mutate (price_mean_total = price_mean * landings, 
+            price_max_total = price_max * landings))
+
+```
+
+At this stage, after having estimated the turnover for the incomplete landings, we know that `r emff_covid %>% filter (culprit_7days_gfw_pefa == "TRUE" & !is.na(culprit_7days_pefa)) %>% nrow ()` dutch vessels landed in PEFA auctions and illegally fished during COVID-19 temporary cessation while they were receiving subsidies from the EMFF. 
+
+Based on the mean market price, these vessels have earned `r format(emff_covid_pefa %>% filter (external_marking %in% c(emff_covid %>% filter(culprit_7days_gfw_pefa == "TRUE" & !is.na(culprit_7days_pefa)) %>% select(external_marking) %>% pull ())) %>% summarise (sum(price_mean_total, na.rm = T)) %>% pull (), big.mark = ",")` € taking into account both the 'real' and 'estimated' turnover over the whole temporary cessation period. Based on the mean market price, they have earned `r format(emff_covid_pefa %>% filter (external_marking %in% c(emff_covid %>% filter(culprit_7days_gfw_pefa == "TRUE" & !is.na(culprit_7days_pefa)) %>% select(external_marking) %>% pull ()))  %>% filter(price == "Real prices") %>% summarise (sum(price_mean_total, na.rm = T)) %>% pull (), big.mark = ",")` € taking into account only the 'real' turnover. Based on the mean market price, they have earned `r format(emff_covid_pefa %>% filter (external_marking %in% c(emff_covid %>% filter(culprit_7days_gfw_pefa == "TRUE" & !is.na(culprit_7days_pefa)) %>% select(external_marking) %>% pull ()))  %>% filter(price == "Estimated prices") %>% summarise (sum(price_mean_total, na.rm = T)) %>% pull (), big.mark = ",")` € taking into account only the 'estimated' turnover.
+Based on the maximum market price, they have earned `r format(emff_covid_pefa %>% filter (external_marking %in% c(emff_covid %>% filter(culprit_7days_gfw_pefa == "TRUE" & !is.na(culprit_7days_pefa)) %>% select(external_marking) %>% pull ())) %>% summarise (sum(price_max_total, na.rm = T)) %>% pull (), big.mark = ",")` € taking into account both the 'real' and 'estimated' turnover. Based on the max market price, they have earned `r format(emff_covid_pefa %>% filter (external_marking %in% c(emff_covid %>% filter(culprit_7days_gfw_pefa == "TRUE" & !is.na(culprit_7days_pefa)) %>% select(external_marking) %>% pull ()))  %>% filter(price == "Real prices") %>% summarise (sum(price_max_total, na.rm = T)) %>% pull (), big.mark = ",")` € taking into account only the 'real' turnover. Based on the max market price, they have earned `r format(emff_covid_pefa %>% filter (external_marking %in% c(emff_covid %>% filter(culprit_7days_gfw_pefa == "TRUE" & !is.na(culprit_7days_pefa)) %>% select(external_marking) %>% pull ()))  %>% filter(price == "Estimated prices") %>% summarise (sum(price_max_total, na.rm = T)) %>% pull (), big.mark = ",")` € taking into account only the 'estimated' turnover.
+
+If we add all the vessels that landed in PEFA and for which there is a suspicion of fraud (since many vessels have an incomplete AIS record and are not able to justify they have respected the "no fishing during 7 consecutive days per week subsidized" rule), we reach `r emff_covid %>% filter ((culprit_7days_gfw_pefa == "TRUE"  | culprit_7days_gfw_pefa == "UNKNOWN") & !is.na(culprit_7days_pefa)) %>% nrow ()` vessels. 
+
+Based on the mean market price, these vessels have earned `r format(emff_covid_pefa %>% filter (external_marking %in% c(emff_covid %>% filter((culprit_7days_gfw_pefa == "TRUE"  | culprit_7days_gfw_pefa == "UNKNOWN") & !is.na(culprit_7days_pefa)) %>% select(external_marking) %>% pull ())) %>% summarise (sum(price_mean_total, na.rm = T)) %>% pull (), big.mark = ",")` € taking into account both the 'real' and 'estimated' turnover. Based on the mean market price, they perceived in total `r format(emff_covid_pefa %>% filter (external_marking %in% c(emff_covid %>% filter((culprit_7days_gfw_pefa == "TRUE"  | culprit_7days_gfw_pefa == "UNKNOWN") & !is.na(culprit_7days_pefa)) %>% select(external_marking) %>% pull ()))  %>% filter(price == "Real prices") %>% summarise (sum(price_mean_total, na.rm = T)) %>% pull (), big.mark = ",")` € taking into account only the 'real' turnover. Based on the mean market price, they have earned `r format(emff_covid_pefa %>% filter (external_marking %in% c(emff_covid %>% filter((culprit_7days_gfw_pefa == "TRUE"  | culprit_7days_gfw_pefa == "UNKNOWN") & !is.na(culprit_7days_pefa)) %>% select(external_marking) %>% pull ()))  %>% filter(price == "Estimated prices") %>% summarise (sum(price_mean_total, na.rm = T)) %>% pull (), big.mark = ",")` € taking into account only the 'estimated' turnover.
+Based on the maximum market price, they have earned `r format(emff_covid_pefa %>% filter (external_marking %in% c(emff_covid %>% filter((culprit_7days_gfw_pefa == "TRUE"  | culprit_7days_gfw_pefa == "UNKNOWN") & !is.na(culprit_7days_pefa)) %>% select(external_marking) %>% pull ())) %>% summarise (sum(price_max_total, na.rm = T)) %>% pull (), big.mark = ",")` € taking into account both the 'real' and 'estimated' turnover. Based on the max market price, they have earned `r format(emff_covid_pefa %>% filter (external_marking %in% c(emff_covid %>% filter((culprit_7days_gfw_pefa == "TRUE"  | culprit_7days_gfw_pefa == "UNKNOWN") & !is.na(culprit_7days_pefa)) %>% select(external_marking) %>% pull ()))  %>% filter(price == "Real prices") %>% summarise (sum(price_max_total, na.rm = T)) %>% pull (), big.mark = ",")` € taking into account only the 'real' turnover. Based on the max market price, they have earned `r format(emff_covid_pefa %>% filter (external_marking %in% c(emff_covid %>% filter((culprit_7days_gfw_pefa == "TRUE"  | culprit_7days_gfw_pefa == "UNKNOWN") & !is.na(culprit_7days_pefa)) %>% select(external_marking) %>% pull ()))  %>% filter(price == "Estimated prices") %>% summarise (sum(price_max_total, na.rm = T)) %>% pull (), big.mark = ",")` € taking into account only the 'estimated' turnover.
+
+### Turnover, subsidies perceived and total weight of fish sold by the culprit and suspicous vessels that landed in PEFA auctions 
+
+The following three figures include all the vessels that landed in PEFA and which have not respected the "no fishing during 7 consecutive days per week subsidized" rule as well as those which are not able to justify the respect of the rule because they switched off their AIS. 
+
+The following figure combines both the 'real' and 'estimated' turnover. Each bar was calculated based on the mean market price. The "standard deviation" was calculated based on the maximum price of the market. For some vessels, the total height of the bar is the sum of the 'real' (shown in a darker color) and 'estimated' (shown in a lighter color) turnover. For these vessels, the total height of the standard deviation is also the sum of the height of the standard deviation for the 'real' and 'estimated' turnover.
+
+
+```{r, echo=FALSE}
+# We first create a new column with the vessel id in the following way : external_marking - vessel name - * if the vessel used electric pulse in the past
+
+emff_covid_pefa <- emff_covid_pefa %>%
+  mutate (vessel = ifelse(electric_fishing == "YES", paste(vessel_name, " *"), vessel_name)) %>%
+  mutate (vessel = paste(external_marking, " - ", vessel)) %>%
+  relocate (vessel, .before = gear) 
+
+```
+
+
+```{r, echo=FALSE}
+
+vessel_to_print <- emff_covid %>% 
+  filter ((culprit_7days_gfw_pefa == "TRUE" | culprit_7days_gfw_pefa == "UNKNOWN") & !is.na(culprit_7days_pefa)) %>%
+  select(external_marking) %>% 
+  distinct () %>%
+  pull ()
+  
+data.fig = emff_covid_pefa %>% 
+  filter (external_marking %in% c(vessel_to_print)) %>%
+  select (-vessel_name) %>% 
+  filter (!is.na(price_mean)) %>% 
+  group_by(vessel, external_marking, pefa_gear_category, price) %>% 
+  summarise (turnover_mean = sum(price_mean_total)/10^3, 
+             turnover_max = sum(price_max_total)/10^3) %>% 
+  ungroup () %>%
+  mutate(sd = turnover_max - turnover_mean) %>% 
+  group_by(vessel) %>%
+  mutate (sd = sum(sd),
+          turnover_mean_add = sum(turnover_mean)) %>%
+  ungroup ()
+
+vessel_levels <- data.fig %>%
+  left_join(emff_covid %>% 
+              select(external_marking, culprit_7days_gfw_pefa), by = "external_marking") %>% 
+  group_by (vessel, culprit_7days_gfw_pefa) %>%
+  summarise (x = sum(turnover_mean)) %>%
+  ungroup () %>%
+  arrange(culprit_7days_gfw_pefa, desc(x)) %>%
+  select(-x)
+
+    ggplot(data.fig %>%
+    mutate (vessel = factor(vessel, levels = vessel_levels %>% select(vessel) %>% pull ())), aes(x = vessel, y = turnover_mean, fill = pefa_gear_category, alpha = price)) + 
+      geom_bar(color = "black", stat = "identity") +
+      scale_alpha_discrete(range = c(0.7, 1.0), guide = 'none') +
+      geom_errorbar(aes(ymin = turnover_mean_add - 0, ymax= turnover_mean_add + sd), width=.3) + 
+      geom_segment(aes(x= 1, xend= vessel_levels %>% filter(culprit_7days_gfw_pefa == "TRUE") %>% nrow(), y = 880, yend=880), colour = "grey30") +
+      geom_segment(aes(x= vessel_levels %>% filter(culprit_7days_gfw_pefa == "TRUE") %>% nrow() + 1, xend= vessel_levels %>% nrow(), y = 880, yend=880), colour = "grey30") +
+      annotate(geom="text", x= vessel_levels %>% filter(culprit_7days_gfw_pefa == "TRUE") %>% nrow()/2, y= 920, label="Culprit vessels", color = "grey30") +
+      annotate(geom="text", x= vessel_levels %>% filter(culprit_7days_gfw_pefa == "TRUE") %>% nrow() + (vessel_levels %>% filter(culprit_7days_gfw_pefa == "UNKNOWN") %>% nrow())/2, y= 920, label="Suspicious vessels", color = "grey30") +
+      theme_classic () %+%
+      theme(axis.text.x = element_text(angle = 90, vjust=0.5, hjust = 1, size = 6), plot.caption = element_text(hjust = 0)) + 
+      labs(x = NULL, y = "Turnover during the temporary cessation period (k€)", fill = "Type of vessel", title = "Turnover for the culprit and suspicious dutch vessels that landed in PEFA auctions", caption = "* = Vessels that have used electric trawls in the past.\nFor each type of vessel, the color gradient indicates whether the turnover is real (dark) or estimated (light).") + 
+  scale_fill_viridis_d () 
+    
+ggsave(last_plot(), file = "Output/Figures/Total_turnover_landings in PEFA auctions.png", width = 30, height = 15, unit = "cm")
+
+```
+
+Then, we look at the EMFF subsidies perceived by the culprit vessels. 
+
+```{r, echo=FALSE}
+
+ggplot(emff_covid_pefa %>% 
+  filter (external_marking %in% c(vessel_to_print)) %>%
+  select (vessel, subsidy_total, subsidy_eu) %>%
+  mutate (vessel = factor(vessel, levels = vessel_levels %>% select(vessel) %>% pull ())) %>% 
+  distinct () %>% 
+  relocate (vessel, .before = subsidy_total) %>%
+  mutate (subsidy_nat = subsidy_total - subsidy_eu) %>%
+  select (-subsidy_total) %>% 
+    rename(EMFF = subsidy_eu, National = subsidy_nat) %>% 
+    pivot_longer(cols = c("EMFF", "National"), names_to = "subsidy_type", values_to = "amount"), aes(x=vessel, y=amount/10^3, fill=subsidy_type)) +
+    geom_bar(color = "black", stat = "identity") + 
+  geom_segment(aes(x= 1, xend= vessel_levels %>% filter(culprit_7days_gfw_pefa == "TRUE") %>% nrow(), y = 50, yend=50), colour = "grey30") + 
+  geom_segment(aes(x= vessel_levels %>% filter(culprit_7days_gfw_pefa == "TRUE") %>% nrow() + 1, xend= vessel_levels %>% nrow(), y = 50, yend=50), colour = "grey30") +
+  annotate(geom="text", x= vessel_levels %>% filter(culprit_7days_gfw_pefa == "TRUE") %>% nrow()/2, y= 53, label="Culprit vessels", color = "grey30") + 
+  annotate(geom="text", x= vessel_levels %>% filter(culprit_7days_gfw_pefa == "TRUE") %>% nrow() + (vessel_levels %>% filter(culprit_7days_gfw_pefa == "UNKNOWN") %>% nrow())/2, y= 53, label="Suspicious vessels", color = "grey30") +
+    theme_classic () %+% 
+  theme(axis.text.x = element_text(angle = 90, vjust=0.5, hjust = 1, size = 6),
+        plot.caption= element_text(hjust = 0)) +
+  labs(x = NULL, y = "Amount of subsidies (k€)", fill = "Type of subsidies", title = "Subsidies perceived by the culprit and suspicious dutch vessels that landed in PEFA auctions", caption = "* = Vessels that have used electric trawls in the past") +
+  scale_fill_viridis_d () 
+    
+ggsave(last_plot(), file = "Output/Figures/Total_subsidies_landings in PEFA auctions.png", width = 30, height = 15, unit = "cm")
+
+```
+
+Then, we look at the total weight of fish landed by the culprit vessels. 
+
+```{r, echo=FALSE}
+
+ggplot(emff_covid_pefa %>% 
+  filter (external_marking %in% c(vessel_to_print)) %>% 
+    select (vessel, date, landings) %>%
+    mutate (vessel = factor(vessel, levels = vessel_levels %>% select(vessel) %>% pull ())) %>% 
+    distinct () %>%
+      group_by(vessel) %>%
+      summarise (landings = sum(landings)/10^3), aes(x=vessel, y=landings)) +
+    geom_bar(color = "black", fill = "grey37", stat = "identity") +
+  geom_segment(aes(x= 1, xend= vessel_levels %>% filter(culprit_7days_gfw_pefa == "TRUE") %>% nrow(), y = 290, yend=290), colour = "grey30") + 
+  geom_segment(aes(x= vessel_levels %>% filter(culprit_7days_gfw_pefa == "TRUE") %>% nrow() + 1, xend= vessel_levels %>% nrow(), y = 290, yend=290), colour = "grey30") +
+  annotate(geom="text", x= vessel_levels %>% filter(culprit_7days_gfw_pefa == "TRUE") %>% nrow()/2, y= 300, label="Culprit vessels", color = "grey30") + 
+  annotate(geom="text", x= vessel_levels %>% filter(culprit_7days_gfw_pefa == "TRUE") %>% nrow() + (vessel_levels %>% filter(culprit_7days_gfw_pefa == "UNKNOWN") %>% nrow())/2, y= 300, label="Suspicious vessels", color = "grey30") +
+    theme_classic () %+% 
+  theme(axis.text.x = element_text(angle = 90, vjust=0.5, hjust = 1, size = 6),
+        plot.caption= element_text(hjust = 0)) +
+  labs(x = NULL, y = "Total weight of fish landed (t)", title = "Total weight of fish landed by the culprit and suspicious dutch vessels that landed in PEFA auctions", caption = "* = Vessels that have used electric trawls in the past")
+    
+ggsave(last_plot(), file = "Output/Figures/Total_weight_landings in PEFA auctions.png", width = 30, height = 15, unit = "cm")
+
+```
+
+### MSC certified products sold in PEFA auctions by the culprit and suspicious vessels
+
+```{r, echo=FALSE}
+
+# we create a vector which contains the vessel in the order we want to plot them
+
+vessel_levels_msc <- emff_covid_pefa  %>% 
+         filter (external_marking %in% c(vessel_to_print)) %>% 
+         filter(!is.na(msc) & !is.na(price_mean)) %>% 
+         group_by(external_marking, vessel, pefa_gear_category) %>% 
+         summarise (turnover_mean = sum(price_mean_total)/10^3, 
+                    turnover_max = sum(price_max_total)/10^3) %>% 
+         ungroup () %>%
+  left_join(emff_covid %>%
+              select (external_marking, culprit_7days_gfw_pefa), by = "external_marking") %>%
+  arrange(culprit_7days_gfw_pefa, desc(turnover_mean)) %>%
+  select (vessel, culprit_7days_gfw_pefa)
+
+```
+
+The following table shows the name and characteristics of the vessels that did not respect TC rules and sold MSC certified products. 
+
+```{r, echo=FALSE}
+
+table (emff_covid_pefa %>%
+  filter (external_marking %in% c(vessel_to_print)) %>% 
+  filter(!is.na(msc)) %>% 
+  select (external_marking, vessel_name, cfr, pefa_gear, length, electric_fishing, weight) %>% 
+  group_by(external_marking, vessel_name, cfr, pefa_gear, length, electric_fishing) %>%
+  summarise (MSC_landings = sum(weight)) %>% 
+  ungroup () %>% 
+  left_join(emff_covid_pefa %>%
+              group_by(external_marking) %>%
+              summarise (Total_landings = sum(weight)), by = "external_marking") %>%
+  mutate(MSC_perc = round(MSC_landings * 100 / Total_landings, 1)) %>%
+  left_join(emff_covid %>%
+              select (external_marking, culprit_7days_gfw_pefa), by = "external_marking") %>% 
+    left_join(emff_covid_pefa %>%
+    filter (external_marking %in% c(vessel_to_print)) %>% 
+    filter(!is.na(msc)) %>%
+    select(external_marking, vessel_name, date, msc, weight) %>% 
+    distinct () %>%
+    left_join(fishing_while_ais_off %>%
+                  select (external_marking, landings_interval) %>% 
+                  mutate(date = int_end(landings_interval),
+                         fishing_while_ais_off = "TRUE") %>%
+                  select (-landings_interval), by = c("external_marking", "date")) %>%
+    filter(!is.na(fishing_while_ais_off)) %>% 
+    group_by(external_marking, vessel_name) %>%
+    summarise (MSC_landed_while_ais_off= sum(weight)), by = c("external_marking", "vessel_name")) %>%
+  rename (culprit = culprit_7days_gfw_pefa) %>%
+    relocate (MSC_landed_while_ais_off, .before = culprit) %>%
+  arrange (culprit, desc(MSC_landings)), "Summary of culprit and suspicious vessels that landed MSC certified products in PEFA auctions")
+
+```
+
+The following figure shows the turnover made by the culprit and suspicious vessels by selling MSC certified products during the temporary cessation period. 
+
+```{r, echo=FALSE}
+
+ggplot(emff_covid_pefa  %>% 
+         filter (external_marking %in% c(vessel_to_print)) %>% 
+         filter(!is.na(msc) & !is.na(price_mean)) %>% 
+         group_by(vessel, pefa_gear_category) %>% 
+         summarise (turnover_mean = sum(price_mean_total)/10^3, 
+                    turnover_max = sum(price_max_total)/10^3) %>% 
+         ungroup () %>% 
+         mutate(sd = turnover_max - turnover_mean,
+                vessel = factor (vessel, levels = vessel_levels_msc %>% select(vessel) %>% pull ())), aes(x = vessel, y = turnover_mean, fill = pefa_gear_category)) +
+  geom_bar(color = "black", stat = "identity") +
+  geom_errorbar(aes(ymin = turnover_mean - 0, ymax= turnover_mean + sd), width=.2) +
+  geom_segment(aes(x= 0, xend= vessel_levels_msc %>% filter(culprit_7days_gfw_pefa == "TRUE") %>% nrow(), y = 240, yend=240), colour = "grey30") + 
+  geom_segment(aes(x= vessel_levels_msc %>% filter(culprit_7days_gfw_pefa == "TRUE") %>% nrow() + 1, xend= vessel_levels_msc %>% nrow(), y = 240, yend=240), colour = "grey30") +
+  annotate(geom="text", x= vessel_levels_msc %>% filter(culprit_7days_gfw_pefa == "TRUE") %>% nrow()/2, y= 260, label="Culprit vessels", color = "grey30") + 
+  annotate(geom="text", x= vessel_levels_msc %>% filter(culprit_7days_gfw_pefa == "TRUE") %>% nrow() + (vessel_levels_msc %>% filter(culprit_7days_gfw_pefa == "UNKNOWN") %>% nrow())/2, y= 260, label="Suspicious vessels", color = "grey30") +
+  theme_classic() %+% 
+  theme(axis.text.x = element_text(angle = 90, vjust=0.5, hjust = 1, size = 10),
+        plot.caption= element_text(hjust = 0)) +
+  labs(x = NULL, y = "Turnover (k€)", fill = "Gear from PEFA", title = "Turnover made by the culprit and suspicious dutch vessels by selling MSC certified products", caption = "* = Vessels that have used electric trawls in the past.") + 
+  scale_fill_viridis_d ()
+
+ggsave(last_plot(), file = "Output/Figures/MSC_turnover_landings in PEFA auctions.png", width = 30, height = 15, unit = "cm")
+
+```
+
+The following figure shows the weight of the MSC certified products sold by the culprit and suspicious vessels that landed in PEFA. 
+
+```{r, echo = FALSE}
+
+ggplot(emff_covid_pefa  %>% 
+         filter (external_marking %in% c(vessel_to_print)) %>% 
+         filter(!is.na(msc) & !is.na(price_mean)) %>% 
+    group_by(vessel, pefa_gear_category) %>%
+    summarise (weight = sum(weight)) %>%
+    ungroup () %>%
+    mutate (vessel = factor(vessel, levels = vessel_levels_msc %>% select(vessel) %>% pull ())), aes(x = vessel, y = weight/10^3, fill = pefa_gear_category)) +
+  geom_bar(color = "black", stat = "identity") +
+  geom_segment(aes(x= 0, xend= vessel_levels_msc %>% filter(culprit_7days_gfw_pefa == "TRUE") %>% nrow(), y = 95, yend=95), colour = "grey30") + 
+  geom_segment(aes(x= vessel_levels_msc %>% filter(culprit_7days_gfw_pefa == "TRUE") %>% nrow() + 1, xend= vessel_levels_msc %>% nrow(), y = 95, yend=95), colour = "grey30") +
+  annotate(geom="text", x= vessel_levels_msc %>% filter(culprit_7days_gfw_pefa == "TRUE") %>% nrow()/2, y= 100, label="Culprit vessels", color = "grey30") + 
+  annotate(geom="text", x= vessel_levels_msc %>% filter(culprit_7days_gfw_pefa == "TRUE") %>% nrow() + (vessel_levels_msc %>% filter(culprit_7days_gfw_pefa == "UNKNOWN") %>% nrow())/2, y= 100, label="Suspicious vessels", color = "grey30") + 
+  theme_classic() %+% 
+  theme(axis.text.x = element_text(angle = 90, vjust=0.5, hjust = 1, size = 10),
+        plot.caption= element_text(hjust = 0)) +
+  labs(x = NULL, y = "Total weight of fish (t)", fill = "Gear from PEFA", title = "Total weight of MSC certified fish illegally fished during the temporary cessation", caption = "* = Vessels that have used electric trawls in the past.") + 
+  scale_fill_viridis_d ()
+
+ggsave(last_plot(), file = "Output/Figures/MSC_weight_landings in PEFA auctions.png", width = 30, height = 15, unit = "cm")
+
+
+```
