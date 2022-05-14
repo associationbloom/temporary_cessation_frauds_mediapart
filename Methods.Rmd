@@ -39,7 +39,7 @@ table <- function(df, caption) {
 
 ## The European fleet register
 
-The EU fleet register (<https://webgate.ec.europa.eu/fleet-europa/search_en>) --- which contains all historical records relating to fishing vessels flagged in EU Member States --- was downloaded on 19 April 2021 with the following filters:
+The EU fleet register (<https://webgate.ec.europa.eu/fleet-europa/search_en>) --- which contains all historical records relating to fishing vessels flagged in EU Member States --- was downloaded on 17 December 2021 with the following filters:
 
 - Country: 'EU'  
 - Period: 'All vessels'  
@@ -48,7 +48,7 @@ The EU fleet register (<https://webgate.ec.europa.eu/fleet-europa/search_en>) --
 The downloaded file was then processed. The first step was to load it:
 
 ```{r}
-fleet <- read.csv2("Data/Raw.nosync/vesselRegistryListResults.csv", quote = "", stringsAsFactors = FALSE) #Load raw data from EU website
+fleet <- read.csv2("https://www.dropbox.com/s/3xc7t2o76ccudqe/vesselRegistryListResults-2021_12_17.csv?dl=1", quote = "", stringsAsFactors = FALSE) #Load raw data from EU website
 ```
 
 ### Fixing incorrect records
@@ -110,7 +110,7 @@ We then added a `gear` based on `gear_code`:
 
 ```{r}
 fleet <- fleet %>%
-  left_join(read_excel("Data/Raw.nosync/MDR_Gear_Type.xls") %>% #Downloaded on the European Commission's CIRCABC platform
+  left_join(read.xlsx("https://www.dropbox.com/s/57dqlccmu1i8r99/MDR_Gear_Type.xlsx?dl=1") %>% #Downloaded on the European Commission's CIRCABC platform
               select(gear_code = Code,
                      gear = EnDescription,
                      gear_cat = SubCategory) %>%
@@ -162,7 +162,7 @@ fleet <- fleet[,.(event_start_date = min(event_start_date),
 The EMFF list of beneficiaries was downloaded from the Netherlands Enterprise Agency's (RVO) website (<https://www.rvo.nl/onderwerpen/agrarisch-ondernemen/visserij-en-aquacultuur/europees-fonds-voor-maritieme-zaken-en-visserij-efmzv/openbaarmaking-efmzv-subsidies>) and loaded:
 
 ```{r}
-emff <- read.xlsx("Data/Raw.nosync/Openbaarmaking_EFMZV_oktober_2021.xlsx")
+emff <- read.xlsx("https://www.dropbox.com/s/ad6vbab7zqgkhck/T%C3%A9l%C3%A9charg%C3%A9%20le%2010-11-2021-Openbaarmaking_EFMZV_oktober_2021.xlsx?dl=1")
 ```
 
 We then selected and renamed the columns of interest:
@@ -291,7 +291,7 @@ To verify that the subsidized vessels have respected these two conditions, we ma
 
 # Let's load the GFW data
 
-gfw_data <- read.xlsx("Data/Processed.nosync/GFW_data.xlsx") %>% 
+gfw_data <- read.xlsx("Data/Processed/GFW_data.xlsx") %>% 
   mutate_at(vars(c("project_start", "project_end", "fishing_start_gfw", "fishing_end_gfw", "ais_off_begin_gfw", "ais_off_end_gfw")), ~as.Date(., origin = "1899-12-30")) %>%
   select (-data_acquisition, -access) %>% 
   mutate(fishing_period = interval(fishing_start_gfw, fishing_end_gfw)) %>%
@@ -301,7 +301,7 @@ gfw_data <- read.xlsx("Data/Processed.nosync/GFW_data.xlsx") %>%
   arrange(external_marking, time_period) %>% 
   filter(!is.na(time_period))
 
-vessel_not_found <- read.xlsx("Data/Processed.nosync/GFW_data.xlsx") %>%
+vessel_not_found <- read.xlsx("Data/Processed/GFW_data.xlsx") %>%
   filter (access == "Not found") %>%
   select (external_marking)
 
@@ -486,7 +486,7 @@ rm(cessation_begin, cessation_end, cessation_weeks)
 Data aggregated daily from the PEFA fish auctions website were loaded:
 
 ```{r}
-pefa <- read.xlsx("Data/Raw.nosync/data_pefa.xlsx", sheet = "TOTAL")
+pefa <- read.xlsx("Data/Raw/data_pefa.xlsx", sheet = "TOTAL")
 ```
 
 We then renamed the columns of interest:
@@ -763,7 +763,7 @@ This figure highlights that most of the vessels switch off once or many times th
 
 ```{r, echo=FALSE, warning=FALSE}
 
-data_fig <- read.xlsx("Data/Processed.nosync/GFW_data.xlsx") %>% 
+data_fig <- read.xlsx("Data/Processed/GFW_data.xlsx") %>% 
           mutate_at(vars(c("project_start", "project_end", "fishing_start_gfw", "fishing_end_gfw", "ais_off_begin_gfw", "ais_off_end_gfw")), ~as.Date(., origin = "1899-12-30")) %>%
           select(-data_acquisition, -access) %>% 
   filter (external_marking %in% c(emff_covid %>% select (external_marking) %>% pull ())) %>% 
@@ -903,7 +903,7 @@ write.xlsx(emff_covid_pefa %>%
            "Output/Data/List of illegal landings with no auction - To be cleaned.xlsx")
 
 emff_covid_pefa <- emff_covid_pefa %>%
-  left_join(read.xlsx("Data/Processed.nosync/List of illegal landings with no auction_cleaned.xlsx") %>%
+  left_join(read.xlsx("Data/Processed/List of illegal landings with no auction_cleaned.xlsx") %>%
   mutate (date = as.Date(date, origin = "1899-12-30")), by = c("date", "external_marking"))
 
 ```
@@ -914,8 +914,8 @@ We then load and clean the detailed list of landings. This detailed list has bee
 
 ```{r}
 
-landing_detail <- read.xlsx("Data/Processed.nosync/List of detailed landings to get.xlsx", sheet = "CAPTURES") %>%
-  bind_rows(read.xlsx("Data/Processed.nosync/List of detailed landings to get.xlsx", sheet = "PULS")) %>%
+landing_detail <- read.xlsx("Data/Processed/List of detailed landings to get.xlsx", sheet = "CAPTURES") %>%
+  bind_rows(read.xlsx("Data/Processed/List of detailed landings to get.xlsx", sheet = "PULS")) %>%
   select (date = Date, 
           external_marking = vessel,
           quality = Qualité,
@@ -961,7 +961,7 @@ After manually search on the PEFA website, we can then load the market prices.
 
 # we load the market prices and do some cleaning of the data.
 
-market_prices <- read.xlsx("Data/Processed.nosync/List of market prices_cleaned.xlsx") %>%
+market_prices <- read.xlsx("Data/Processed/List of market prices_cleaned.xlsx") %>%
   rename(price_mean = Prix.Moy., price_max = Prix.Max.) %>%
   mutate (Taille = str_remove(Taille, "\\s[A-Z]+"),
     metadata = paste0(Espèce, " ", Taille, " ",Info, " ",Qual.), 
@@ -1046,7 +1046,7 @@ http://www.bloomassociation.org/en/wp-content/uploads/2020/09/beyond-illegal-ann
 emff_covid_pefa  <- emff_covid_pefa  %>% 
   mutate (price_mean_total = price_mean * weight, 
           price_max_total = price_max * weight) %>% 
-  left_join(read.xlsx("Data/Processed.nosync/list of electric trawlers.xlsx") %>% 
+  left_join(read.xlsx("Data/Processed/list of electric trawlers.xlsx") %>% 
               select ("Ext.Mark") %>% 
               rename(external_marking = Ext.Mark) %>% 
               mutate (external_marking = gsub(" ","",external_marking), 
@@ -1065,7 +1065,7 @@ Then, we estimate the turnover for the incomplete landings, i.e. those for which
 # we add the fishing zone to our dataset based on PEFA data
 
 emff_covid_pefa <- emff_covid_pefa %>%
-left_join(read.xlsx("Data/Raw.nosync/data_pefa.xlsx", sheet = "TOTAL") %>% 
+left_join(read.xlsx("Data/Raw/data_pefa.xlsx", sheet = "TOTAL") %>% 
     select(date = Date, external_marking = Navire, fishing_zone = Zone.de.pêche, landings = Poids.total.de.poissons.débarqués) %>% 
     mutate(across(where(is.character), str_trim)) %>% 
     mutate(external_marking = str_remove_all(external_marking, c("\\\"|\\\r|\\\n|\\*|/UFA| ?|-?")), 
