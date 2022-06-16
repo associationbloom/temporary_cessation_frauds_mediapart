@@ -48,7 +48,9 @@ The EU fleet register (<https://webgate.ec.europa.eu/fleet-europa/search_en>) --
 The downloaded file was then processed. The first step was to load it:
 
 ```{r}
-fleet <- read.csv2("https://www.dropbox.com/s/3xc7t2o76ccudqe/vesselRegistryListResults-2021_12_17.csv?dl=1", quote = "", stringsAsFactors = FALSE) 
+ fleet <- read.csv2("https://www.dropbox.com/s/3xc7t2o76ccudqe/vesselRegistryListResults-2021_12_17.csv?dl=1", quote = "", stringsAsFactors = FALSE) 
+
+#fleet <- read.csv2("Data/Raw/vesselRegistryListResults-2021_12_17.csv", quote = "", stringsAsFactors = FALSE) 
 #Load raw data from EU website
 ```
 
@@ -288,11 +290,14 @@ Ajouter une étiquette pour indiquer combien de navires sont concernés dans cha
                                        ifelse(gear == "Pots", "Pot",
                                               ifelse(gear == "Set gillnets (anchored)", "Gillnets", gear)))))) %>%
   group_by(class_length, gear) %>%
-  summarise(subsidy = sum(subsidy_total), subsidy = subsidy/10^6) %>%
+  summarise(subsidy = sum(subsidy_total), subsidy = subsidy/10^6,
+            label = n(),
+            label = ifelse(label < 5, "", as.character(label))) %>%
   ungroup() %>%
-  add_row (class_length = "<12 m", gear = "Beam trawl", subsidy = 0) %>% # we add a row for the <12 m size class, since it did not received any subsidies. 
+  add_row (class_length = "<12 m", gear = "Beam trawl", subsidy = 0, label = "") %>% # we add a row for the <12 m size class, since it did not received any subsidies. 
   mutate(class_length = factor (class_length, levels = c("<12 m", "12-25 m", "25-40 m", ">40 m"))), aes(x=class_length, y=subsidy, fill = gear)) +
   geom_col (color = "grey0") +
+  geom_text (aes(label = label), fontface = "bold", color = "grey100", position = position_stack(vjust = .5)) +
   labs (x="Vessel length class", y ="Subsidies received for temporary cessation (million EUR)", fill = "Fishing gear", caption = "This plot includes all vessels that received subsidies for temporary\ncessation, i.e. those that landed in PEFA and those that did not.") + 
   theme_bw () %+% 
   theme(plot.caption= element_text(hjust = 0)) +
@@ -324,7 +329,7 @@ To verify that the subsidized vessels have respected these two conditions, we ma
 # Let's load the GFW data
 
 gfw_data <- read.xlsx("Data/Processed/GFW_data.xlsx") %>% 
-    mutate_at(vars(c("project_start", "project_end", "fishing_start_gfw", "fishing_end_gfw", "ais_off_begin_gfw", "ais_off_end_gfw")), ~as.Date(., format = "%d/%m/%Y", origin = "1899-12-30")) %>%
+    mutate_at(vars(c("project_start", "project_end", "fishing_start_gfw", "fishing_end_gfw", "ais_off_begin_gfw", "ais_off_end_gfw")), ~as.Date(., origin = "1899-12-30")) %>%
   select (-data_acquisition, -access, -cfr, -mmsi, -vessel_name, -last_check) %>% 
   mutate(fishing_period = interval(fishing_start_gfw, fishing_end_gfw)) %>%
   mutate(ais_off_period = interval(ais_off_begin_gfw, ais_off_end_gfw)) %>%
@@ -670,7 +675,7 @@ rm(cessation_begin, cessation_end)
 
 ```
 
-Based on PEFA data, we found `r emff_covid %>% filter (culprit_7days_pefa == "TRUE") %>% nrow ()` culprit vessels that did not respect the "no fishing during 7 consecutive days per week subsidized" rule. Among those vessels, `r emff_covid %>% filter (culprit_7days_pefa == "TRUE" & culprit_7days_gfw == "UNKNOWN") %>% nrow ()` additional vessels were identified as culprit (they belonged to the "unknown" group based on GFW data),`r emff_covid %>% filter (culprit_7days_pefa == "TRUE" & culprit_7days_gfw == "TRUE") %>% nrow ()` vessels were already identified as culprit based on GFW data, and `r emff_covid %>% filter (culprit_7days_pefa == "TRUE" & culprit_7days_gfw == "FALSE") %>% nrow ()` vessels (UK145 and G023) were identified as culprit based on PEFA data but not culprit based on GFW data (there is a conflict between PEFA and GFW data for these vessels).
+Based on PEFA data, we found `r emff_covid %>% filter (culprit_7days_pefa == "TRUE") %>% nrow ()` culprit vessels that did not respect the "no fishing during 7 consecutive days per week subsidized" rule. Among those vessels, `r emff_covid %>% filter (culprit_7days_pefa == "TRUE" & culprit_7days_gfw == "UNKNOWN") %>% nrow ()` additional vessels were identified as culprit (they belonged to the "unknown" group based on GFW data), `r emff_covid %>% filter (culprit_7days_pefa == "TRUE" & culprit_7days_gfw == "TRUE") %>% nrow ()` vessels were already identified as culprit based on GFW data, and `r emff_covid %>% filter (culprit_7days_pefa == "TRUE" & culprit_7days_gfw == "FALSE") %>% nrow ()` vessels (UK145 and G023) were identified as culprit based on PEFA data but not culprit based on GFW data (there is a conflict between PEFA and GFW data for these vessels).
 
 Taking into account both GFW and PEFA data, we determine if a vessel respected the "no fishing during 7 consecutive days per week subsidized" rule. We create three categories : the vessels that did not respect the rule, the vessels that did respect the rule, and the vessels for which we don't know based on our data. 
 
@@ -797,7 +802,7 @@ The black unfilled rectangle indicates the temporary cessation period. The red v
 ```{r, echo=FALSE, warning=FALSE}
 
 data_fig <- read.xlsx("Data/Processed/GFW_data.xlsx") %>% 
-          mutate_at(vars(c("project_start", "project_end", "fishing_start_gfw", "fishing_end_gfw", "ais_off_begin_gfw", "ais_off_end_gfw")), ~as.Date(., format = "%d/%m/%Y", origin = "1899-12-30")) %>%
+          mutate_at(vars(c("project_start", "project_end", "fishing_start_gfw", "fishing_end_gfw", "ais_off_begin_gfw", "ais_off_end_gfw")), ~as.Date(., origin = "1899-12-30")) %>%
           select (-data_acquisition, -access, -cfr, -mmsi, -vessel_name, -last_check) %>% 
   filter (external_marking %in% c(emff_covid %>% select (external_marking) %>% pull ())) %>% 
   bind_rows (emff_covid_pefa %>% 
@@ -1307,6 +1312,10 @@ ggplot(emff_covid_pefa %>%
 ggsave(last_plot(), file = "Output/Figures/Total_weight_landings in PEFA auctions.png", width = 30, height = 15, unit = "cm")
 
 ```
+
+Culprit vessels that have landed in pefa auctions landed `r emff_covid_pefa %>% filter (vessel %in% c(vessel_levels %>% filter (culprit_7days_gfw_pefa == "TRUE") %>% select (vessel) %>% pull ())) %>% select (vessel, date, landings) %>% distinct () %>% ungroup () %>% summarise (sum(landings)/10^3)` tons of marine products.
+Suspicious vessels that have landed in pefa auctions landed `r emff_covid_pefa %>% filter (vessel %in% c(vessel_levels %>% filter (culprit_7days_gfw_pefa == "UNKNOWN") %>% select (vessel) %>% pull ())) %>% select (vessel, date, landings) %>% distinct () %>% ungroup () %>% summarise (sum(landings)/10^3)` tons of marine products. 
+
 
 ### MSC certified products sold in PEFA auctions by the culprit and suspicious vessels
 
