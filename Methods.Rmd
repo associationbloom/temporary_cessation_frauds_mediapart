@@ -50,7 +50,7 @@ The downloaded file was then processed. The first step was to load it:
 ```{r}
  fleet <- read.csv2("https://www.dropbox.com/s/3xc7t2o76ccudqe/vesselRegistryListResults-2021_12_17.csv?dl=1", quote = "", stringsAsFactors = FALSE) 
 
-#fleet <- read.csv2("Data/Raw/vesselRegistryListResults-2021_12_17.csv", quote = "", stringsAsFactors = FALSE) 
+# fleet <- read.csv2("Data/Raw/vesselRegistryListResults-2021_12_17.csv", quote = "", stringsAsFactors = FALSE) 
 #Load raw data from EU website
 ```
 
@@ -274,40 +274,6 @@ emff_covid <- emff_covid %>%
 
 ```
 
-We then plot the distribution of TC subsidies between vessel size class and gear 
-
-##########
-Ajouter une étiquette pour indiquer combien de navires sont concernés dans chaque catégorie 
-#########
-```{r}
- ggplot(emff_covid %>% 
-  mutate(class_length = ifelse(length < 12, "<12 m", 
-                               ifelse(length >= 12 & length < 25, "12-25 m", #Official FranceAgriMer classification
-                                      ifelse(length >= 25 & length < 40, "25-40 m", ">40 m")))) %>%
-    mutate(gear = ifelse(gear %in% c("Scottish seines", "Danish seines", "Pair seines"), "Demersal seine",
-                         ifelse(gear %in% c("Single boat bottom otter trawls", "Twin bottom otter trawls"), "Otter trawl",
-                                ifelse(gear == "Beam trawls", "Beam trawl",
-                                       ifelse(gear == "Pots", "Pot",
-                                              ifelse(gear == "Set gillnets (anchored)", "Gillnets", gear)))))) %>%
-  group_by(class_length, gear) %>%
-  summarise(subsidy = sum(subsidy_total), subsidy = subsidy/10^6,
-            label = n(),
-            label = ifelse(label < 5, "", as.character(label))) %>%
-  ungroup() %>%
-  add_row (class_length = "<12 m", gear = "Beam trawl", subsidy = 0, label = "") %>% # we add a row for the <12 m size class, since it did not received any subsidies. 
-  mutate(class_length = factor (class_length, levels = c("<12 m", "12-25 m", "25-40 m", ">40 m"))), aes(x=class_length, y=subsidy, fill = gear)) +
-  geom_col (color = "grey0") +
-  geom_text (aes(label = label), fontface = "bold", color = "grey100", position = position_stack(vjust = .5)) +
-  labs (x="Vessel length class", y ="Subsidies received for temporary cessation (million EUR)", fill = "Fishing gear", caption = "This plot includes all vessels that received subsidies for temporary\ncessation, i.e. those that landed in PEFA and those that did not.") + 
-  theme_bw () %+% 
-  theme(plot.caption= element_text(hjust = 0)) +
-  scale_fill_viridis_d () 
-
-
-ggsave(last_plot(), file = "Output/Figures/Subsidies received for temporary cessation.png", width = 30, height = 15, unit = "cm")
-
-```
-
 # Results
 
 ## Culprit vessels
@@ -389,6 +355,39 @@ emff_covid <- emff_covid %>%
 ```
 
 Hence the following analyses focus on the `r nrow(emff_covid)` subsidized vessels that were identified on GFW and whose length is higher than 15 m. 
+
+We then plot the distribution of TC subsidies between vessel size class and gear 
+
+```{r}
+
+ ggplot(emff_covid %>% 
+         mutate(class_length = ifelse(length < 12, "<12 m", 
+                                      ifelse(length >= 12 & length < 25, "12-25 m", #Official FranceAgriMer classification
+                                             ifelse(length >= 25 & length < 40, "25-40 m", ">40 m")))) %>%
+         mutate(gear = ifelse(gear %in% c("Scottish seines", "Danish seines", "Pair seines"), "Senne démersale",
+                              ifelse(gear %in% c("Single boat bottom otter trawls", "Twin bottom otter trawls"), "Chalut à panneaux",
+                                     ifelse(gear == "Beam trawls", "Chalut à perche",
+                                            ifelse(gear == "Pots", "Casier",
+                                                   ifelse(gear == "Set gillnets (anchored)", "Filet maillant", gear)))))) %>%
+         group_by(class_length, gear) %>%
+         summarise(subsidy = sum(subsidy_total), subsidy = subsidy/10^6,
+                   label = n(),
+                   label = ifelse(label < 5, "", as.character(label))) %>%
+         ungroup() %>%
+         add_row (class_length = "<12 m", gear = "Chalut à perche", subsidy = 0, label = "") %>% # we add a row for the <12 m size class, since it did not received any subsidies. 
+         mutate(class_length = factor (class_length, levels = c("<12 m", "12-25 m", "25-40 m", ">40 m")),
+                gear = factor(gear, levels = c("Chalut à perche", "Chalut à panneaux", "Senne démersale", "Casier", "Filet maillant"))), aes(x=class_length, y=subsidy, fill = gear)) +
+  geom_col (color = "grey0") +
+  geom_text (aes(label = label), fontface = "bold", color = "grey100", position = position_stack(vjust = .5)) +
+  labs (x="Classe de taille des navires", y ="Subventions reçues pour les arrêts temporaires (million EUR)", fill = "Engin de pêche") + 
+  theme_bw () %+% 
+  theme(plot.caption= element_text(hjust = 0)) +
+  scale_fill_viridis_d () 
+
+
+ggsave(last_plot(), file = "Output/Figures/Subsidies received for temporary cessation.png", width = 30, height = 15, unit = "cm")
+
+```
 
 We then calculate the fraction of the temporary cessation period during which vessels switched off their AIS. 
 
