@@ -245,7 +245,7 @@ div.tocify {
 <h1 class="title toc-ignore">Analysis of COVID temporary cessation payments allocated to the Dutch fleet</h1>
 <h3 class="subtitle">Detailed methodology</h3>
 <h4 class="author">Augustin Lafond, Laetitia Bisiaux and Frédéric Le Manach</h4>
-<h4 class="date">juin 23, 2022</h4>
+<h4 class="date">juin 27, 2022</h4>
 
 </div>
 
@@ -263,10 +263,8 @@ div.tocify {
 <li>Search data context: ‘Search data in the whole history of the vessels’</li>
 </ul>
 <p>The downloaded file was then processed. The first step was to load it:</p>
-<pre class="r"><code># fleet &lt;- read.csv2(&quot;https://www.dropbox.com/s/3xc7t2o76ccudqe/vesselRegistryListResults-2021_12_17.csv?dl=1&quot;, quote = &quot;&quot;, stringsAsFactors = FALSE) 
-
-fleet &lt;- read.csv2(&quot;Data/Raw/vesselRegistryListResults-2021_12_17.csv&quot;, quote = &quot;&quot;, stringsAsFactors = FALSE) 
-#Load raw data from EU website</code></pre>
+<pre class="r"><code>#fleet &lt;- read.csv2(&quot;https://www.dropbox.com/s/3xc7t2o76ccudqe/vesselRegistryListResults-2021_12_17.csv?dl=1&quot;, quote = &quot;&quot;, stringsAsFactors = FALSE) 
+fleet &lt;- read.csv2(&quot;Data/Raw/vesselRegistryListResults-2021_12_17.csv&quot;, quote = &quot;&quot;, stringsAsFactors = FALSE) </code></pre>
 <div id="fixing-incorrect-records" class="section level3" number="1.1.1">
 <h3><span class="header-section-number">1.1.1</span> Fixing incorrect records</h3>
 <p>We then proceeded with cleaning the fleet’s data. The first step was to fix the Register’s exported file, which contained 5 rows that did not tabulate correctly:</p>
